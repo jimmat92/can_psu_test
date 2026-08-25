@@ -99,6 +99,22 @@ The control bus is **electrically and logically separate** from the powered
 branches; it needs its own CAN interface port on the PC. DE-9 pinout per
 CiA-303: pin 2 = CAN-L, pin 3 = CAN GND, pin 7 = CAN-H, pin 9 = optional V+.
 
+**Back-plane isolation switch.** The crate has a switch on its back-plane that
+connects or isolates the internal ELMB's supply from the control CAN bus
+(`ElmbPsuIntroduction.pdf` §2). With more than one crate on a bus it *must* be
+set to **Isolated**. With a single crate on a bench setup either position can
+work, but it decides whether the crate feeds power onto the control bus - check
+it before assuming the CAN interface must supply V+ on DE-9 pin 9.
+
+**External references cited by the PDF, not yet followed up:**
+- PH-ESS hardware page: <http://ess.web.cern.ch/ESS/canpsuProject/index.htm>
+  - the most likely public source for the **Burndy pinout**, still an open item
+  (see section 8).
+- Branch connection scheme guidance, EDMS:
+  <https://edms.cern.ch/file/685351//CANbus_Guideline.pdf>
+- fwElmbPSU / fwElmb downloads:
+  <http://atlas.web.cern.ch/Atlas/GROUPS/DAQTRIG/DCS/ELMB/DIST/ELMBdoc.html>
+
 ### 4.2 Branch numbering
 
 From `ElmbPsuIntroduction.pdf` Figure 4 (verified by rendering page 7 of the PDF
