@@ -27,29 +27,49 @@ Two more things worth knowing before you probe with a meter:
 - The rails are floating. Measure each positive pin against **its own return**,
   not against chassis.
 
-## 2. What is missing on this machine
+## 2. Check the machine before you touch anything
 
-```
-$ ls /sys/class/net/          -> eno1  eno2  lo      (no can0)
-$ lsusb                       -> no CAN adapter
-$ command -v candump          -> not installed
-$ CanOpenOpcUa/CanModuleMain/ -> empty (git submodule not checked out)
-```
-
-You need a CAN interface on the **control** bus (the D-sub, separate from the
-powered branches). The kernel here already ships SocketCAN plus `peak_usb`,
-`kvaser_usb`, `gs_usb` and `usb_8dev`, so a PEAK PCAN-USB, a Kvaser, or a
-CANable/candleLight will come up as `can0` with no extra drivers. A SysTec
-USB-CANmodul needs SysTec's out-of-tree driver (CERN ships RPMs for it). An
-AnaGate needs no kernel driver but is not reachable by the SocketCAN tool below.
-
-Bring the link up at the ELMB PSU default bitrate:
+`pcaticstest08` is a **shared** machine. Other people run WinCC OA projects,
+CanOpenOpcUa servers and CAN traffic on it, and a bus that is already carrying
+a CANopen master is not yours to take. Run this first:
 
 ```bash
-sudo ip link set can0 down
-sudo ip link set can0 type can bitrate 125000
-sudo ip link set can0 up
-ip -details link show can0
+./can_diag.py
+```
+
+It reports, in three sections:
+
+1. **OPC-UA servers running here.** Every listening TCP port is greeted with an
+   OPC-UA `HELLO` (OPC 10000-6 §7.1.2); anything that answers `ACK` or `ERR` is
+   an OPC-UA server, anything else is not. Confirmed servers are then asked
+   `GetEndpoints` for their application name, so you see *which* server it is —
+   `CanOpen@host` / `urn:CERN:CanOpenOpcUa` is another CanOpenOpcUa instance and
+   very likely already owns a CAN port.
+2. **What CAN interfaces exist**, with link state, CAN state, bitrate, frame
+   counters and a live frame rate, grouped by the physical USB adapter behind
+   them.
+3. **Which are used and which are free.** "Used" comes from the kernel's own
+   receive lists (`/proc/net/can/rcvlist_*`) — an entry there means a process
+   holds an open socket bound to that device, and it covers every user on the
+   box whether or not you can read their `/proc`. That is cross-checked against
+   the live frame rate and, where possible, attributed to a PID via `lsof`.
+
+It is read-only: it never configures a link and never transmits a CAN frame.
+`--json` gives the same data machine-readably; `--no-probe` stops it connecting
+to anything.
+
+At the time of writing this host has a **SysTec Multiport CAN-to-USB**, four
+boxes of two ports each, as `can8`…`can15` (`systec_can`, out-of-tree, already
+installed). `can9` is busy with a live CANopen system. Do not assume that is
+still true — that is what the script is for.
+
+Once you have a free port, bring it up at the ELMB PSU default bitrate:
+
+```bash
+sudo ip link set can8 down
+sudo ip link set can8 type can bitrate 125000
+sudo ip link set can8 up
+ip -details link show can8
 ```
 
 Control-bus CAN pinout on the DE-9 (CiA-303 standard, which the ELMB follows):
@@ -65,26 +85,32 @@ inside the modules only terminate the *branch* buses.
 to install. Use this to answer "is the crate alive and can I switch a branch?"
 before you invest in the OPC-UA stack.
 
+Substitute the interface `can_diag.py` told you was free — `can8` below.
+
 ```bash
 # 1. Is anything on the bus? (probes node-guard on all 127 node ids)
-./elmbpsu_can.py --iface can0 scan
+./elmbpsu_can.py --iface can8 scan
 
 # 2. Who is node 63?
-./elmbpsu_can.py --iface can0 info
+./elmbpsu_can.py --iface can8 info
 
 # 3. Current configuration and branch states
-./elmbpsu_can.py --iface can0 status
+./elmbpsu_can.py --iface can8 status
 
 # 4. Switch slot 0 position A (branch 0) on, with automatic read-back verify
-./elmbpsu_can.py --iface can0 on 0
+./elmbpsu_can.py --iface can8 on 0
 
 # 5. Measure. Then read what the crate thinks the rails are doing:
-./elmbpsu_can.py --iface can0 mon --branches 0
+./elmbpsu_can.py --iface can8 mon --branches 0
 
 # 6. Everything on / everything off
-./elmbpsu_can.py --iface can0 on all
-./elmbpsu_can.py --iface can0 off all
+./elmbpsu_can.py --iface can8 on all
+./elmbpsu_can.py --iface can8 off all
 ```
+
+Never point this at a bus `can_diag.py` reported as IN USE. Two CANopen
+masters on one bus collide on SDO transfers, and you would be switching
+branches out from under whoever else is on it.
 
 Useful extras: `-v` traces every CAN frame, `dump` is a passive candump,
 `nmt start|preop|reset` drives the NMT state machine, and `--method sdo` uses
@@ -253,9 +279,9 @@ cycle without any software in the loop:
 
 ```bash
 # example: all 16 branches on at power-up, on a production crate
-./elmbpsu_can.py --iface can0 on all
+./elmbpsu_can.py --iface can8 on all
 # then persist the ELMB parameters (0x1010:01 <- "save")
-./elmbpsu_can.py --iface can0 outmask 0xFF 0xFF --store
+./elmbpsu_can.py --iface can8 outmask 0xFF 0xFF --store
 ```
 
 `doInitHigh` (0x2300) is the object that governs this; read it with `status`
@@ -265,6 +291,7 @@ before and after so you can see what changed.
 
 | file | what it is |
 |------|------------|
+| `can_diag.py` | read-only pre-flight: OPC-UA servers, CAN interfaces, who owns what |
 | `elmbpsu_can.py` | dependency-free SocketCAN control/diagnosis tool |
 | `selftest.py` | offline verification of the above against a simulated ELMB |
 | `config-elmbpsu.xml` | CanOpenOpcUa server configuration for one crate |

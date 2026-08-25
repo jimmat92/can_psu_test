@@ -205,6 +205,9 @@ verify() {
   else
     warn "no CAN interface - see HANDOFF.md section 6 before testing hardware"
   fi
+  if ls /sys/class/net | grep -q '^can\|^vcan'; then
+    info "Which of them are free: ./can_diag.py"
+  fi
 
   info "Verifying our own tools"
   if python3 "$SCRIPT_DIR/selftest.py" >/dev/null 2>&1; then
@@ -216,6 +219,11 @@ verify() {
     ok "config-elmbpsu.xml is well-formed"
   else
     fail "config-elmbpsu.xml is not well-formed"; rc=1
+  fi
+  if python3 -c "import ast,sys; ast.parse(open('$SCRIPT_DIR/can_diag.py').read())" 2>/dev/null; then
+    ok "can_diag.py parses - run ./can_diag.py before taking a CAN port"
+  else
+    fail "can_diag.py does not parse"; rc=1
   fi
   return $rc
 }

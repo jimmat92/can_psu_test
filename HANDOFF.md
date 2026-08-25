@@ -28,30 +28,32 @@ installed or run.
 ## 2. Where everything is
 
 ```
-/home/dmatakia/can_psu_test/                 <- primary working directory
-├── ElmbPsuIntroduction.pdf                  reference: the CERN PSU guide (8 pages)
-├── initial_discussion.txt                   reference: earlier ChatGPT session notes
+/home/dmatakia/can_psu_test/                 <- the git repo AND working directory
+├── setup.sh                                 restores this workspace on a new machine
+├── can_diag.py                              read-only environment pre-flight
+├── elmbpsu_can.py                           SocketCAN tool, zero dependencies
+├── selftest.py                              offline verification of the above
+├── config-elmbpsu.xml                       CanOpenOpcUa server config
+├── elmbpsu_opcua.py                         OPC-UA client (the WinCC OA replacement)
+├── README.md                                full write-up + troubleshooting
+├── QUICKSTART.md                            short operator procedure
+├── HANDOFF.md                               this file
+├── .gitignore                               written by setup.sh
 ├── CanOpenOpcUa/                            reference: the OPC-UA server source
 ├── fwElmb/                                  reference: JCOP ELMB component
-├── fwElmbPSU/                               reference: JCOP ELMB PSU component
-├── fwInstallation-9.3.1/                    reference: not needed so far
-├── jcop-framework-9.3.0.1/                  reference: not needed so far
-└── can_psu_test/                            <- OUR DELIVERABLES (git repo)
-    ├── setup.sh                              restores this workspace on a new machine
-    ├── elmbpsu_can.py                        SocketCAN tool, zero dependencies
-    ├── selftest.py                           offline verification of the above
-    ├── config-elmbpsu.xml                    CanOpenOpcUa server config
-    ├── elmbpsu_opcua.py                      OPC-UA client (the WinCC OA replacement)
-    ├── README.md                             full write-up + troubleshooting
-    ├── QUICKSTART.md                         short operator procedure
-    ├── HANDOFF.md                            this file
-    └── .gitignore                            written by setup.sh
+└── fwElmbPSU/                               reference: JCOP ELMB PSU component
 ```
 
-Note the nesting: the deliverables directory is `can_psu_test/can_psu_test/`.
-The user renamed it from `psu_test/` after it was created. It is a git repo
-(`origin = https://github.com/jimmat92/can_psu_test.git`, one commit
-`42d0ad2 Initial commit`).
+**The layout changed.** An earlier revision of this file described a nested
+`can_psu_test/can_psu_test/` with the reference material as siblings. What is
+actually on disk now is a plain `git clone` plus `./setup.sh` at its default
+`--dest .`, so the three reference repos sit *inside* the repo (and are
+gitignored). `ElmbPsuIntroduction.pdf`, `initial_discussion.txt`,
+`fwInstallation-9.3.1/` and `jcop-framework-9.3.0.1/` are **not** present here;
+an identical copy of the PDF ships inside `fwElmbPSU/source/`.
+
+Git: `origin = https://github.com/jimmat92/can_psu_test.git`, HEAD
+`81aebb8 Added env setup script`.
 
 ### Restoring this workspace elsewhere
 
@@ -289,6 +291,46 @@ transmission. Subcommands: `scan` (probes node ids 1–127), `info`, `status`,
 Every `on`/`off` reads `0x6200` back and prints `read-back OK` or a
 `READ-BACK MISMATCH` with the specific likely causes.
 
+### `can_diag.py` — environment pre-flight (added 2026-08-25)
+
+Written because the machine turned out to be shared and to already have CAN
+hardware and a CanOpenOpcUa server on it. Read-only: it configures no link and
+transmits no CAN frame. Stdlib only, except for one optional `asyncua` call.
+Three sections:
+
+1. **OPC-UA servers.** Listening TCP sockets are read from `/proc/net/tcp{,6}`
+   rather than via `ss -p`, because `ss`/`netstat` hide the process for another
+   user's socket while the uid column in `/proc` never does. Each plausible
+   port is then greeted with a real OPC-UA UACP `HELLO` (OPC 10000-6 §7.1.2):
+   `ACK` or `ERR` proves an OPC-UA server, anything else disproves it. Validated
+   both ways — a live `asyncua` server on 48012 was detected, and
+   sshd/cups/postfix/WinCC OA ports were correctly rejected. Confirmed servers
+   are then asked `GetEndpoints` for their ApplicationName/Uri, which is what
+   identified the `urn:CERN:CanOpenOpcUa` instance noted in section 6.
+2. **CAN interfaces.** `/sys/class/net/*/type == 280` (ARPHRD_CAN) enumerates
+   them; `ip -details -json link show` supplies CAN state and bitrate (sysfs
+   does not carry those); `/sys/class/net/*/statistics/*` sampled twice gives a
+   live frame rate; the sysfs `device` symlink is walked up to the USB parent so
+   ports are grouped by the physical box they share.
+3. **Used vs. unused.** The authoritative signal is `/proc/net/can/rcvlist_*`,
+   the kernel's per-device receive filter list. An entry there means some
+   process holds an open socket bound to that device, and it is readable by any
+   user without root. That is cross-checked against the live frame rate and
+   attributed to a PID via `lsof` (which labels AF_CAN sockets as
+   `protocol: CAN_RAW`), with a `/proc/*/fd` scan as fallback.
+
+**Known limit, stated in the output:** rcvlist names the *device* but not the
+process; lsof names the *process* but not the device. Nothing in the kernel's
+user-visible interface joins them. The script joins them only where a command
+line names an interface (`candump can11`) or the match is unambiguous, and says
+so plainly otherwise. Without root you cannot read other users' `/proc/*/fd`, so
+the PID list is yours alone — the socket *counts*, being kernel-side, still
+cover everybody.
+
+`--json` emits the same data machine-readably; `--no-probe` suppresses all
+outbound connections; `--sample 0` skips the traffic window; `--no-identify`
+skips the asyncua call.
+
 ### `selftest.py` — offline verification
 
 Simulates an ELMB responder and exercises the tool without hardware: SDO
@@ -358,30 +400,57 @@ read-backs matched.
 
 README is the full write-up with source citations and a 5-step troubleshooting
 ladder (§6) for "branch still shows 0 V after a verified switch-on". QUICKSTART
-is the short operator procedure: bring up `can0` → start the server → CAN
+is the short operator procedure: pick a free port with `can_diag.py` → bring
+it up → start the server → CAN
 debugging → status → switch → read.
 
 ---
 
 ## 6. Environment state — READ THIS BEFORE PROMISING ANYTHING
 
-**There is no CAN hardware attached and nothing has been tested on real
-hardware.** Everything above is verified against simulators only.
+**CAN hardware is now present. Nothing has yet been tested against the PSU
+crate itself** — sections 4 and 5 are still verified against simulators only —
+but the bus side of this environment has changed completely since this document
+was first written. Re-check it with `./can_diag.py` rather than trusting the
+snapshot below.
+
+As of 2026-08-25 on `pcaticstest08`:
 
 ```
-/sys/class/net/          -> eno1, eno2, lo      (no can0, no vcan)
-lsusb                    -> no CAN adapter present
-candump/cansend          -> not installed (no can-utils)
-vcan kernel module       -> NOT present (would need kernel-modules-extra),
-                            so not even a virtual-CAN dry run is possible
+CAN adapters   4 x SYS TEC "Multiport CAN-to-USB" (0878:1101), USB 1-13.1..1-13.4
+interfaces     can8..can15   (2 ports per box, ch0/ch1)
+driver         systec_can (out-of-tree, already installed and loaded)
+can-utils      installed (candump, cansend, cangen in /usr/bin)
+can9           UP, 125 kbit/s, ~12 frames/s, 30M frames, 1 socket bound -- IN USE
+can11          UP, 125 kbit/s, no socket bound, ~72k frames historically
+can8/10/12-15  DOWN, unbound -- free
 ```
 
-Available in-tree SocketCAN drivers: `peak_usb`, `kvaser_usb`, `gs_usb`,
-`usb_8dev`, `slcan`, `peak_canfd`, plus `can.ko` / `can-raw.ko`. So a PEAK
-PCAN-USB, Kvaser, or CANable/candleLight will enumerate as `can0` with no extra
-work. A **SysTec USB-CANmodul needs SysTec's out-of-tree driver** (CERN ships
-RPMs). An **AnaGate** needs no kernel driver but is *not* reachable by
-`elmbpsu_can.py` — it would need `provider="an"` in the server config instead.
+**This is a shared machine.** Other users (`jsouter`, `kapoplaw`, `nkanello`)
+run WinCC OA projects and CanOpenOpcUa on it. Two OPC-UA servers answered a
+handshake during this work:
+
+| endpoint | owner | identity |
+|----------|-------|----------|
+| `opc.tcp://[::1]:4841` | jsouter | `OpcUaServer@pcaticstest08`, `urn:CERN:QuasarOpcUaServer` |
+| `opc.tcp://[::1]:33815` | root | `CanOpen@pcaticstest08`, `urn:CERN:CanOpenOpcUa` |
+
+The second is a **CanOpenOpcUa server already running here**, almost certainly
+the `podman run --privileged -v /home/jsouter/can-dev-4/CanOpenOpcUa:...`
+container (pid 3117043), and the most likely owner of `can9`. Port 48012 —
+CanOpenOpcUa's own default — was free. There is also one named network
+namespace (`netns-2ad82ea7-...`); CAN devices and ports inside it are invisible
+from the host namespace, so `can_diag.py` cannot see them either.
+
+Do not take a bus without checking first. That is what `can_diag.py` is for,
+and it is read-only.
+
+Other in-tree SocketCAN drivers, if a different adapter turns up: `peak_usb`,
+`kvaser_usb`, `gs_usb`, `usb_8dev`, `slcan`, `peak_canfd`. An **AnaGate** needs
+no kernel driver but is *not* reachable by `elmbpsu_can.py` — it would need
+`provider="an"` in the server config instead. The `vcan` module is still absent
+(needs kernel-modules-extra), so a virtual-CAN dry run remains impossible; use a
+free real port instead.
 
 **`CanOpenOpcUa` in this workspace is not buildable as-is.** The `CanModuleMain`
 and `LogIt` submodule directories are **empty**:
@@ -396,11 +465,13 @@ XSD/xerces and the quasar toolchain; `quasar.py` drives the build. If ATLAS DCS
 RPMs are available, installing the prebuilt package is far less work.
 
 Other environment facts:
-- Python **3.13.1** at `/usr/local/bin/python3`; `socket.AF_CAN` and
-  `socket.CAN_RAW` both present.
+- Python **3.13.1** at `/usr/local/bin/python3` and **3.9.25** at
+  `/usr/bin/python3`; `socket.AF_CAN`/`socket.CAN_RAW` present in both. Note
+  that `#!/usr/bin/env python3` resolves to **3.9** in a default login shell, so
+  keep the tools 3.6-compatible.
 - **`asyncua` 2.0.1 was pip-installed** into
-  `/usr/local/lib/python3.13/site-packages/` during this work. `python-can` is
-  not installed and is not needed.
+  `/usr/local/lib/python3.13/site-packages/`; `asyncua` 1.1.8 is also present
+  for 3.9. `python-can` is not installed and is not needed.
 - The server binary path assumed throughout is `/opt/CanOpenOpcUa/bin/` (from
   `CanOpenOpcUa/Documentation/ExampleConfiguration/config-vcan0.xml`).
 - Endpoint from `CanOpenOpcUa/bin/ServerConfig.xml`:
@@ -441,11 +512,15 @@ Its claims about terminators, the separate control bus, floating outputs, and
 
 ## 8. What to do next / open items
 
-1. **Get a CAN adapter onto the control bus.** Nothing further can be verified
-   without one. This is the single blocking item.
-2. Run `./elmbpsu_can.py --iface can0 scan` first — it confirms the bitrate,
+1. **Wire the crate's control bus to a free CAN port and bring it up.** The
+   adapter is there now (section 6); what is still unknown is whether the crate
+   is physically connected to any of the free ports. Run `./can_diag.py` to pick
+   one, then bring it up at 125000.
+2. Run `./elmbpsu_can.py --iface <free-port> scan` — it confirms the bitrate,
    the wiring and the actual node id in one shot. If empty, retry the link at
-   250000 and 50000 before suspecting wiring.
+   250000 and 50000 before suspecting wiring. Do **not** run it against `can9`
+   or any port `can_diag.py` reports as IN USE: a second CANopen master on a
+   live bus collides on SDO transfers.
 3. Only then bother with the OPC-UA server. The raw tool can prove the hardware
    works; the server is for the production control path.
 4. **Unknowns that hardware will settle immediately:** whether this crate is
