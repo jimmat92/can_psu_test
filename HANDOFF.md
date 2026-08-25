@@ -37,19 +37,53 @@ installed or run.
 ├── fwInstallation-9.3.1/                    reference: not needed so far
 ├── jcop-framework-9.3.0.1/                  reference: not needed so far
 └── can_psu_test/                            <- OUR DELIVERABLES (git repo)
-    ├── elmbpsu_can.py                       SocketCAN tool, zero dependencies
-    ├── selftest.py                          offline verification of the above
-    ├── config-elmbpsu.xml                   CanOpenOpcUa server config
-    ├── elmbpsu_opcua.py                     OPC-UA client (the WinCC OA replacement)
-    ├── README.md                            full write-up + troubleshooting
-    ├── QUICKSTART.md                        short operator procedure
-    └── HANDOFF.md                           this file
+    ├── setup.sh                              restores this workspace on a new machine
+    ├── elmbpsu_can.py                        SocketCAN tool, zero dependencies
+    ├── selftest.py                           offline verification of the above
+    ├── config-elmbpsu.xml                    CanOpenOpcUa server config
+    ├── elmbpsu_opcua.py                      OPC-UA client (the WinCC OA replacement)
+    ├── README.md                             full write-up + troubleshooting
+    ├── QUICKSTART.md                         short operator procedure
+    ├── HANDOFF.md                            this file
+    └── .gitignore                            written by setup.sh
 ```
 
 Note the nesting: the deliverables directory is `can_psu_test/can_psu_test/`.
 The user renamed it from `psu_test/` after it was created. It is a git repo
 (`origin = https://github.com/jimmat92/can_psu_test.git`, one commit
 `42d0ad2 Initial commit`).
+
+### Restoring this workspace elsewhere
+
+```bash
+git clone https://github.com/jimmat92/can_psu_test.git
+cd can_psu_test
+./setup.sh                 # add --ssh if you have a CERN GitLab SSH key
+```
+
+`setup.sh` clones the three reference repos, writes `.gitignore`, and verifies
+that every source file cited in section 4 is present plus that the toolchain
+works (`--check` verifies without cloning; `--pip` installs asyncua;
+`--submodules` inits CanModuleMain/LogIt if you intend to build the server;
+`--dest ..` places the repos as siblings instead of inside this repo, which is
+the layout on the user's machine). It is idempotent and detects repos already
+present in either location.
+
+The reference repos are **pinned to the exact commits that were read**, because
+section 4 cites specific files and an upstream change could silently invalidate
+a citation. `--latest` takes master instead, at that risk.
+
+| repo | upstream (gitlab.cern.ch) | pinned commit | version |
+|------|---------------------------|---------------|---------|
+| `CanOpenOpcUa` | `atlas-dcs-opcua-servers/CanOpenOpcUa` | `a34bbabfeae8b501150b0d8f47728b8539914d09` | tag `v1.0.0` |
+| `fwElmb` | `atlas-dcs-fwcomponents/fwElmb` | `094ecdd25ad5a3f19a1e37f4fa9415992e1bb426` | `9.4.6-15-g094ecdd` |
+| `fwElmbPSU` | `atlas-dcs-fwcomponents/fwElmbPSU` | `101665b1983da85d56c65fb449fb22f298ca2468` | tag `9.2.3` |
+
+All three are on **CERN GitLab and may need credentials** (a personal access
+token as the HTTPS password, or an SSH key). `ElmbPsuIntroduction.pdf` needs no
+separate fetch — an identical copy ships inside `fwElmbPSU/source/`, alongside
+the editable `.doc`. `fwInstallation-9.3.1/` and `jcop-framework-9.3.0.1/` are
+deliberately **not** fetched; nothing here needs them (see section 8).
 
 ---
 

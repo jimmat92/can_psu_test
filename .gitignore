@@ -1,0 +1,28 @@
+# --- reference repositories fetched by setup.sh -----------------------------
+# Read-only sources that the tools here were reverse-engineered from.
+# Never commit them: they are large, and they have their own upstreams.
+/CanOpenOpcUa/
+/fwElmb/
+/fwElmbPSU/
+
+# Optional trees, not required by anything here (see HANDOFF.md section 8).
+/fwInstallation-*/
+/jcop-framework-*/
+
+# --- python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# --- local runtime output --------------------------------------------------
+*.log
+candump*.txt
+
+# --- editors / OS ----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
