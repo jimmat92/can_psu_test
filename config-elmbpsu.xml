@@ -1,0 +1,251 @@
+<?xml version="1.0" encoding="ASCII"?>
+<!--
+  CanOpenOpcUa configuration for a CERN ELMB PSU crate.
+
+  Self-contained: it does NOT pull in the CANopen_def_STDELMB_*.xmle entity
+  files, so it can be dropped anywhere without DTD path problems. The content
+  is equivalent to STDELMB_FOUNDATIONS + STDELMB_AI_TPDO3 + STDELMB_DO_RPDO
+  plus the PSU-specific extras (per-branch booleans, DIO direction masks,
+  power-up state, on-request analog reads).
+
+  Run:  /opt/CanOpenOpcUa/bin/CanOpenOpcUa /path/to/config-elmbpsu.xml
+  Endpoint: opc.tcp://<host>:48012  (anonymous, security None)
+
+  ADJUST BEFORE USE:
+    Bus/@port      - "can0" for SocketCAN; for AnaGate set provider="an"
+                     and port to the AnaGate address form your CanModule wants.
+    Bus/@settings  - "125k" lets the server configure the bitrate (needs
+                     privileges). Use "DontConfigure" if you set the link up
+                     yourself with:
+                       sudo ip link set can0 type can bitrate 125000
+                       sudo ip link set can0 up
+    Node/@id       - 63 (0x3F) is the ELMB PSU factory default.
+
+  BRANCH -> BIT MAP (from fwElmbPSU_createPowerControl + fwElmbUser_setDoBits):
+    branch 0..7  -> port C bit 0..7   -> do_write bits  0..7  (RPDO1 byte 0)
+    branch 8..15 -> port A bit 0..7   -> do_write bits  8..15 (RPDO1 byte 1)
+    branch      = 2*slot + (0 for position A/top, 1 for position B/bottom)
+    Production PSU: 1 = ON, 0 = OFF. Pre-2.0.0 PSU: inverted.
+-->
+<configuration xmlns="http://cern.ch/quasar/Configuration"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:schemaLocation="http://cern.ch/quasar/Configuration /opt/CanOpenOpcUa/Configuration/Configuration.xsd">
+
+  <StandardMetaData>
+    <Log>
+      <ComponentLogLevels>
+        <ComponentLogLevel componentName="CanModule" logLevel="INF"/>
+        <ComponentLogLevel componentName="Sdo"       logLevel="INF"/>
+        <ComponentLogLevel componentName="Rpdo"      logLevel="TRC"/>
+      </ComponentLogLevels>
+    </Log>
+    <SourceVariableThreadPool minThreads="1" maxThreads="3"/>
+  </StandardMetaData>
+
+  <GlobalSettings name="GlobalSettings"/>
+  <Warnings name="Warnings" rxFromUnknownNode="false" tpdoSyncMismatch="true" unexpectedTpdo="false"/>
+
+  <Bus name="psuCtrlBus" provider="sock" port="can0" settings="125k"
+       syncIntervalMs="10000" nodeGuardIntervalMs="10000"
+       spyMode="inheritFromGlobalSettings">
+
+    <Node name="psuCrate1" id="63" requestedState="OPERATIONAL"
+          stateInfoSource="NodeGuard" emergencyMappingModel="ELMBio">
+
+      <!-- ============ STDELMB_FOUNDATIONS ============ -->
+      <SdoVariable index="1009" subIndex="0" access="R"  dataType="UInt32" name="hwVersion"/>
+      <SdoSameIndexGroup index="100A" name="elmbSw">
+        <SdoVariable subIndex="0" access="R" dataType="UInt32" name="swVersion"/>
+        <SdoVariable subIndex="1" access="R" dataType="UInt32" name="swMinorVersion"/>
+      </SdoSameIndexGroup>
+      <SdoVariable index="100C" subIndex="0" access="R"  dataType="UInt16" name="guardTime"/>
+      <SdoVariable index="100D" subIndex="0" access="RW" dataType="Byte"   name="lifeTime"/>
+      <SdoVariable index="3100" subIndex="0" access="R"  dataType="UInt32" name="serialNumber"/>
+      <SdoSameIndexGroup index="1010" name="storeParams">
+        <SdoVariable subIndex="1" access="RW" dataType="UInt32" name="save"/>
+      </SdoSameIndexGroup>
+      <SdoSameIndexGroup index="1011" name="restoreParams">
+        <SdoVariable subIndex="1" access="RW" dataType="UInt32" name="load"/>
+      </SdoSameIndexGroup>
+
+      <!-- ============ DIGITAL OUTPUT: configuration ============ -->
+      <!-- Direction masks: bit=1 means that pin is an OUTPUT.
+           Both must read 0xFF on a PSU crate ELMB; if they do not, the
+           branches can never be switched. -->
+      <SdoSameIndexGroup index="6208" name="dioOutputMask">
+        <SdoVariable subIndex="1" access="RW" dataType="Byte" name="dioOutputMaskC"/>
+        <SdoVariable subIndex="2" access="RW" dataType="Byte" name="dioOutputMaskA"/>
+      </SdoSameIndexGroup>
+      <!-- State the outputs take at ELMB power-up. This is why the crate comes
+           up with every branch dead after switching the mains on. -->
+      <SdoVariable index="2300" subIndex="0" access="RW" dataType="Byte" name="doInitHigh"/>
+
+      <!-- ============ DIGITAL OUTPUT: read-back ============ -->
+      <SdoSameIndexGroup index="6200" name="do_read">
+        <SdoVariable subIndex="1" access="R" dataType="Byte" name="do_C_read"/>
+        <SdoVariable subIndex="2" access="R" dataType="Byte" name="do_A_read"/>
+      </SdoSameIndexGroup>
+
+      <!-- ============ DIGITAL OUTPUT: bitwise SDO write ============ -->
+      <!-- Alternative control path. Unlike the RPDO it also works while the
+           node is only PRE-OPERATIONAL, which makes it handy for diagnosis. -->
+      <SdoSameIndexGroup index="6220" name="do_bitwise">
+      <SdoVariable subIndex="1" access="RW" dataType="Boolean" name="do_C_0"/>  <!-- branch  0 -->
+      <SdoVariable subIndex="2" access="RW" dataType="Boolean" name="do_C_1"/>  <!-- branch  1 -->
+      <SdoVariable subIndex="3" access="RW" dataType="Boolean" name="do_C_2"/>  <!-- branch  2 -->
+      <SdoVariable subIndex="4" access="RW" dataType="Boolean" name="do_C_3"/>  <!-- branch  3 -->
+      <SdoVariable subIndex="5" access="RW" dataType="Boolean" name="do_C_4"/>  <!-- branch  4 -->
+      <SdoVariable subIndex="6" access="RW" dataType="Boolean" name="do_C_5"/>  <!-- branch  5 -->
+      <SdoVariable subIndex="7" access="RW" dataType="Boolean" name="do_C_6"/>  <!-- branch  6 -->
+      <SdoVariable subIndex="8" access="RW" dataType="Boolean" name="do_C_7"/>  <!-- branch  7 -->
+      <SdoVariable subIndex="9" access="RW" dataType="Boolean" name="do_A_0"/>  <!-- branch  8 -->
+      <SdoVariable subIndex="10" access="RW" dataType="Boolean" name="do_A_1"/>  <!-- branch  9 -->
+      <SdoVariable subIndex="11" access="RW" dataType="Boolean" name="do_A_2"/>  <!-- branch 10 -->
+      <SdoVariable subIndex="12" access="RW" dataType="Boolean" name="do_A_3"/>  <!-- branch 11 -->
+      <SdoVariable subIndex="13" access="RW" dataType="Boolean" name="do_A_4"/>  <!-- branch 12 -->
+      <SdoVariable subIndex="14" access="RW" dataType="Boolean" name="do_A_5"/>  <!-- branch 13 -->
+      <SdoVariable subIndex="15" access="RW" dataType="Boolean" name="do_A_6"/>  <!-- branch 14 -->
+      <SdoVariable subIndex="16" access="RW" dataType="Boolean" name="do_A_7"/>  <!-- branch 15 -->
+      </SdoSameIndexGroup>
+
+      <!-- ============ DIGITAL OUTPUT: RPDO1 (the control path) ============ -->
+      <!-- This is exactly what fwElmbPSU writes to. Requires OPERATIONAL.
+           do_write is the whole 16-bit word; branchNN are the same bits
+           exposed one-by-one as Booleans so a client can flip a single
+           branch without a read-modify-write of its own. -->
+      <Rpdo name="RPDO1" selector="1">
+        <RpdoCachedVariable name="do_write" dataType="UInt16" offset="0"/>
+      <!-- branch  0 = slot 0, position A  ->  port C bit 0 -->
+      <RpdoCachedVariable name="branch00" dataType="Boolean" offset="0" booleanToBit="0"/>
+      <!-- branch  1 = slot 0, position B  ->  port C bit 1 -->
+      <RpdoCachedVariable name="branch01" dataType="Boolean" offset="0" booleanToBit="1"/>
+      <!-- branch  2 = slot 1, position A  ->  port C bit 2 -->
+      <RpdoCachedVariable name="branch02" dataType="Boolean" offset="0" booleanToBit="2"/>
+      <!-- branch  3 = slot 1, position B  ->  port C bit 3 -->
+      <RpdoCachedVariable name="branch03" dataType="Boolean" offset="0" booleanToBit="3"/>
+      <!-- branch  4 = slot 2, position A  ->  port C bit 4 -->
+      <RpdoCachedVariable name="branch04" dataType="Boolean" offset="0" booleanToBit="4"/>
+      <!-- branch  5 = slot 2, position B  ->  port C bit 5 -->
+      <RpdoCachedVariable name="branch05" dataType="Boolean" offset="0" booleanToBit="5"/>
+      <!-- branch  6 = slot 3, position A  ->  port C bit 6 -->
+      <RpdoCachedVariable name="branch06" dataType="Boolean" offset="0" booleanToBit="6"/>
+      <!-- branch  7 = slot 3, position B  ->  port C bit 7 -->
+      <RpdoCachedVariable name="branch07" dataType="Boolean" offset="0" booleanToBit="7"/>
+      <!-- branch  8 = slot 4, position A  ->  port A bit 0 -->
+      <RpdoCachedVariable name="branch08" dataType="Boolean" offset="1" booleanToBit="0"/>
+      <!-- branch  9 = slot 4, position B  ->  port A bit 1 -->
+      <RpdoCachedVariable name="branch09" dataType="Boolean" offset="1" booleanToBit="1"/>
+      <!-- branch 10 = slot 5, position A  ->  port A bit 2 -->
+      <RpdoCachedVariable name="branch10" dataType="Boolean" offset="1" booleanToBit="2"/>
+      <!-- branch 11 = slot 5, position B  ->  port A bit 3 -->
+      <RpdoCachedVariable name="branch11" dataType="Boolean" offset="1" booleanToBit="3"/>
+      <!-- branch 12 = slot 6, position A  ->  port A bit 4 -->
+      <RpdoCachedVariable name="branch12" dataType="Boolean" offset="1" booleanToBit="4"/>
+      <!-- branch 13 = slot 6, position B  ->  port A bit 5 -->
+      <RpdoCachedVariable name="branch13" dataType="Boolean" offset="1" booleanToBit="5"/>
+      <!-- branch 14 = slot 7, position A  ->  port A bit 6 -->
+      <RpdoCachedVariable name="branch14" dataType="Boolean" offset="1" booleanToBit="6"/>
+      <!-- branch 15 = slot 7, position B  ->  port A bit 7 -->
+      <RpdoCachedVariable name="branch15" dataType="Boolean" offset="1" booleanToBit="7"/>
+      </Rpdo>
+
+      <!-- ============ ANALOG INPUTS ============ -->
+      <!-- Per branch b:  CANvoltage = ch,  ADvoltage = ch+1,
+                          CANcurrent = ch+4, ADcurrent = ch+5
+           where ch = 4*b - 2*(b mod 2).
+           Raw values are signed microvolts at the ADC input:
+                voltage [V] = raw/1e6 * 100.0
+                current [A] = (raw/1e6 - 2.5) * 5.0/0.625 -->
+      <SdoSameIndexGroup index="1802" name="aiTransmit">
+        <SdoVariable subIndex="2" access="RW" dataType="Byte"   name="aiTransmissionType"/>
+        <SdoVariable subIndex="5" access="RW" dataType="UInt16" name="aiEventTimer"/>
+      </SdoSameIndexGroup>
+      <SdoSameIndexGroup index="2100" name="aiConfig">
+        <SdoVariable subIndex="1" access="RW" dataType="Byte" name="channelMax"/>
+        <SdoVariable subIndex="2" access="RW" dataType="Byte" name="rate"/>
+        <SdoVariable subIndex="3" access="RW" dataType="Byte" name="range"/>
+        <SdoVariable subIndex="4" access="RW" dataType="Byte" name="mode"/>
+      </SdoSameIndexGroup>
+
+      <!-- SYNC-driven scan of all 64 channels. Needs aiTransmissionType = 1. -->
+      <TpdoMultiplex name="TPDO3" selector="3" transportMechanism="sync">
+        <MultiplexedChannelConfigurationGenerator numberOfChannels="64" name="gic">
+          <MultiplexedChannel name="specimen" id="1">
+            <ExtractedValue name="adcFlag" dataType="Byte"  offset="1"/>
+            <ExtractedValue name="value"   dataType="Int32" offset="2"/>
+          </MultiplexedChannel>
+        </MultiplexedChannelConfigurationGenerator>
+      </TpdoMultiplex>
+
+      <!-- On-request reads of the same channels. Independent of SYNC/TPDO,
+           so this still works if the ELMB is not set up for sync transfer. -->
+      <SdoSameIndexGroup index="2404" name="aisdo">
+      <SdoVariable subIndex="1" access="R" dataType="Int32" name="aisdo_0"/>
+      <SdoVariable subIndex="2" access="R" dataType="Int32" name="aisdo_1"/>
+      <SdoVariable subIndex="3" access="R" dataType="Int32" name="aisdo_2"/>
+      <SdoVariable subIndex="4" access="R" dataType="Int32" name="aisdo_3"/>
+      <SdoVariable subIndex="5" access="R" dataType="Int32" name="aisdo_4"/>
+      <SdoVariable subIndex="6" access="R" dataType="Int32" name="aisdo_5"/>
+      <SdoVariable subIndex="7" access="R" dataType="Int32" name="aisdo_6"/>
+      <SdoVariable subIndex="8" access="R" dataType="Int32" name="aisdo_7"/>
+      <SdoVariable subIndex="9" access="R" dataType="Int32" name="aisdo_8"/>
+      <SdoVariable subIndex="10" access="R" dataType="Int32" name="aisdo_9"/>
+      <SdoVariable subIndex="11" access="R" dataType="Int32" name="aisdo_10"/>
+      <SdoVariable subIndex="12" access="R" dataType="Int32" name="aisdo_11"/>
+      <SdoVariable subIndex="13" access="R" dataType="Int32" name="aisdo_12"/>
+      <SdoVariable subIndex="14" access="R" dataType="Int32" name="aisdo_13"/>
+      <SdoVariable subIndex="15" access="R" dataType="Int32" name="aisdo_14"/>
+      <SdoVariable subIndex="16" access="R" dataType="Int32" name="aisdo_15"/>
+      <SdoVariable subIndex="17" access="R" dataType="Int32" name="aisdo_16"/>
+      <SdoVariable subIndex="18" access="R" dataType="Int32" name="aisdo_17"/>
+      <SdoVariable subIndex="19" access="R" dataType="Int32" name="aisdo_18"/>
+      <SdoVariable subIndex="20" access="R" dataType="Int32" name="aisdo_19"/>
+      <SdoVariable subIndex="21" access="R" dataType="Int32" name="aisdo_20"/>
+      <SdoVariable subIndex="22" access="R" dataType="Int32" name="aisdo_21"/>
+      <SdoVariable subIndex="23" access="R" dataType="Int32" name="aisdo_22"/>
+      <SdoVariable subIndex="24" access="R" dataType="Int32" name="aisdo_23"/>
+      <SdoVariable subIndex="25" access="R" dataType="Int32" name="aisdo_24"/>
+      <SdoVariable subIndex="26" access="R" dataType="Int32" name="aisdo_25"/>
+      <SdoVariable subIndex="27" access="R" dataType="Int32" name="aisdo_26"/>
+      <SdoVariable subIndex="28" access="R" dataType="Int32" name="aisdo_27"/>
+      <SdoVariable subIndex="29" access="R" dataType="Int32" name="aisdo_28"/>
+      <SdoVariable subIndex="30" access="R" dataType="Int32" name="aisdo_29"/>
+      <SdoVariable subIndex="31" access="R" dataType="Int32" name="aisdo_30"/>
+      <SdoVariable subIndex="32" access="R" dataType="Int32" name="aisdo_31"/>
+      <SdoVariable subIndex="33" access="R" dataType="Int32" name="aisdo_32"/>
+      <SdoVariable subIndex="34" access="R" dataType="Int32" name="aisdo_33"/>
+      <SdoVariable subIndex="35" access="R" dataType="Int32" name="aisdo_34"/>
+      <SdoVariable subIndex="36" access="R" dataType="Int32" name="aisdo_35"/>
+      <SdoVariable subIndex="37" access="R" dataType="Int32" name="aisdo_36"/>
+      <SdoVariable subIndex="38" access="R" dataType="Int32" name="aisdo_37"/>
+      <SdoVariable subIndex="39" access="R" dataType="Int32" name="aisdo_38"/>
+      <SdoVariable subIndex="40" access="R" dataType="Int32" name="aisdo_39"/>
+      <SdoVariable subIndex="41" access="R" dataType="Int32" name="aisdo_40"/>
+      <SdoVariable subIndex="42" access="R" dataType="Int32" name="aisdo_41"/>
+      <SdoVariable subIndex="43" access="R" dataType="Int32" name="aisdo_42"/>
+      <SdoVariable subIndex="44" access="R" dataType="Int32" name="aisdo_43"/>
+      <SdoVariable subIndex="45" access="R" dataType="Int32" name="aisdo_44"/>
+      <SdoVariable subIndex="46" access="R" dataType="Int32" name="aisdo_45"/>
+      <SdoVariable subIndex="47" access="R" dataType="Int32" name="aisdo_46"/>
+      <SdoVariable subIndex="48" access="R" dataType="Int32" name="aisdo_47"/>
+      <SdoVariable subIndex="49" access="R" dataType="Int32" name="aisdo_48"/>
+      <SdoVariable subIndex="50" access="R" dataType="Int32" name="aisdo_49"/>
+      <SdoVariable subIndex="51" access="R" dataType="Int32" name="aisdo_50"/>
+      <SdoVariable subIndex="52" access="R" dataType="Int32" name="aisdo_51"/>
+      <SdoVariable subIndex="53" access="R" dataType="Int32" name="aisdo_52"/>
+      <SdoVariable subIndex="54" access="R" dataType="Int32" name="aisdo_53"/>
+      <SdoVariable subIndex="55" access="R" dataType="Int32" name="aisdo_54"/>
+      <SdoVariable subIndex="56" access="R" dataType="Int32" name="aisdo_55"/>
+      <SdoVariable subIndex="57" access="R" dataType="Int32" name="aisdo_56"/>
+      <SdoVariable subIndex="58" access="R" dataType="Int32" name="aisdo_57"/>
+      <SdoVariable subIndex="59" access="R" dataType="Int32" name="aisdo_58"/>
+      <SdoVariable subIndex="60" access="R" dataType="Int32" name="aisdo_59"/>
+      <SdoVariable subIndex="61" access="R" dataType="Int32" name="aisdo_60"/>
+      <SdoVariable subIndex="62" access="R" dataType="Int32" name="aisdo_61"/>
+      <SdoVariable subIndex="63" access="R" dataType="Int32" name="aisdo_62"/>
+      <SdoVariable subIndex="64" access="R" dataType="Int32" name="aisdo_63"/>
+      </SdoSameIndexGroup>
+
+    </Node>
+  </Bus>
+</configuration>
