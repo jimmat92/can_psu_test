@@ -47,16 +47,32 @@ trouble — fix that before going further.
 Edit `config-elmbpsu.xml` first: set `Bus/@port` to the interface you picked in
 step 1, and `Node/@id` if your node is not 63. Since step 2 already set the
 bitrate, change `settings="125k"` to
-`settings="DontConfigure"` in that file. Leave this running in its own terminal.
+`settings="DontConfigure"` in that file. Then start it detached, so it survives
+you closing the terminal.
 
 ```bash
-/opt/CanOpenOpcUa/bin/CanOpenOpcUa --config_file config-elmbpsu.xml \
-    --lSdo INF --lNodeMgmt INF --print_cobids_tables
+nohup /opt/labTempMonitor/bin/CanOpenOpcUa \
+    --config_file  $PWD/config-elmbpsu.xml \
+    --opcua_backend_config $PWD/ServerConfig-elmbpsu.xml \
+    --lSdo INF --lNodeMgmt INF --print_cobids_tables \
+    > server.log 2>&1 &
 ```
 
-It listens on `opc.tcp://<host>:48012`, anonymous, no security — `can_diag.py`
-in step 1 already told you whether that port was taken. Add
+`--opcua_backend_config` is **not optional here**, despite what `--help` says.
+Its default is `/opt/labTempMonitor/bin/ServerConfig.xml`, which declares port
+**33815** — already bound by the lab temperature monitor that has been running
+since July. `ServerConfig-elmbpsu.xml` is that same file with the port changed
+to 48012, which `can_diag.py` confirmed is free.
+
+Watch it come up, then leave it:
+
+```bash
+tail -f server.log        # Ctrl-C detaches; the server keeps running
+```
+
+It listens on `opc.tcp://<host>:48012`, anonymous, no security. Add
 `--endpoint opc.tcp://HOST:48012` to every command below if it is not local.
+Stop it with `kill <pid>` — plain SIGTERM shuts it down cleanly.
 
 ### 4. Debug the CAN bus (only if step 5 comes back empty)
 

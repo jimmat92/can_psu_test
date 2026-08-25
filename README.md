@@ -208,12 +208,34 @@ What it exposes beyond the stock ELMB model, and why:
 
 Run it:
 
+Two builds are installed on `pcaticstest08`. Use the one under
+`/opt/labTempMonitor/`, which is the tagged `v0.10.1` release and the build the
+lab actually runs; `/opt/CanOpenOpcUa/bin/` holds a newer but `-dirty` pipeline
+build of v0.10.2.
+
 ```bash
-/opt/CanOpenOpcUa/bin/CanOpenOpcUa --config_file /path/to/config-elmbpsu.xml
+nohup /opt/labTempMonitor/bin/CanOpenOpcUa \
+    --config_file  $PWD/config-elmbpsu.xml \
+    --opcua_backend_config $PWD/ServerConfig-elmbpsu.xml \
+    > server.log 2>&1 &
 ```
 
-Endpoint is `opc.tcp://<host>:48012`, anonymous, security `None`
-(`CanOpenOpcUa/bin/ServerConfig.xml`).
+**Always pass `--opcua_backend_config`.** It defaults to
+`<directory of the binary>/ServerConfig.xml` — for the labTempMonitor build that
+declares port **33815**, which the running lab temperature monitor already owns,
+so the server would fail to open its endpoint. `ServerConfig-elmbpsu.xml` here is
+that file with the port changed to **48012**.
+
+Endpoint is then `opc.tcp://<host>:48012`, anonymous, security `None`.
+`kill <pid>` (plain SIGTERM) shuts it down cleanly; so does Ctrl-C in the
+foreground.
+
+Other ways to background it: `tmux new -s psu` and detach with `Ctrl-B D` if you
+want to watch it and keep a terminal; or
+`systemd-run --user --unit=elmbpsu ...` for `systemctl --user status/stop`
+semantics — but your account cannot read the user journal, so redirect output to
+a file either way, and note that `Linger=no` means a `--user` unit dies when you
+log out.
 
 ### Building the server
 

@@ -472,7 +472,31 @@ Other environment facts:
 - **`asyncua` 2.0.1 was pip-installed** into
   `/usr/local/lib/python3.13/site-packages/`; `asyncua` 1.1.8 is also present
   for 3.9. `python-can` is not installed and is not needed.
-- The server binary path assumed throughout is `/opt/CanOpenOpcUa/bin/` (from
+- **Two CanOpenOpcUa builds are installed.** `/opt/labTempMonitor/bin/` is the
+  tagged **v0.10.1** (28 Jun 2026) and the one the user's colleague pointed at;
+  `/opt/CanOpenOpcUa/bin/` is a newer **v0.10.2-2-gf7bf9aa-dirty** pipeline build
+  (20 Jul 2026). Both run and resolve all their libraries. Use labTempMonitor's.
+- **`--opcua_backend_config` defaults to `<binary dir>/ServerConfig.xml`** —
+  `getApplicationPath()`, not the CWD (`BaseQuasarServer.cpp:308`, and `--help`
+  prints the resolved path). For the labTempMonitor build that file declares
+  endpoint port **33815**, which the running lab temperature monitor already
+  holds, so the flag must be passed explicitly. `ServerConfig-elmbpsu.xml` in
+  this repo is that file with the port changed to 48012 (the only diff).
+- **`/opt/labTempMonitor/bin/config.xml` is the lab temperature monitor's own
+  config: `<Bus port="can9" settings="125k">`, ELMB node id 33.** That is the
+  definitive answer to who owns `can9` — pid 615812, `./labTempMonitor` (a
+  symlink to the CanOpenOpcUa binary), running as root since 10 July 2026, and
+  serving `opc.tcp://pcaticstest08:33815`. It is a production monitor on this
+  bench. Never bring up, reconfigure or transmit on can9.
+- Server lifecycle, verified 2026-08-25 with a bus-less config on port 48012:
+  starts fine under `nohup ... &`, binds the endpoint, and **exits cleanly on
+  plain SIGTERM** (`kill <pid>`) as well as SIGINT. `systemd-run --user` also
+  works, but this account cannot read the user journal (`Linger=no` too), so
+  redirect stdout/stderr to a file regardless of method.
+- Security is `None` with `EnableAnonymous=true`, and the PKI paths in
+  ServerConfig.xml (`/localdisk/tmp/PKI/CA/certs/`) exist and are world-writable,
+  so no certificate work is needed.
+- The old assumed server binary path was `/opt/CanOpenOpcUa/bin/` (from
   `CanOpenOpcUa/Documentation/ExampleConfiguration/config-vcan0.xml`).
 - Endpoint from `CanOpenOpcUa/bin/ServerConfig.xml`:
   `opc.tcp://[NodeName]:48012`, anonymous, security policy `None`.
