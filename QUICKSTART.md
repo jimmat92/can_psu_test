@@ -8,7 +8,7 @@ you).
 
 ```bash
 pip install asyncua
-cd /home/dmatakia/can_psu_test/psu_test
+cd ~/can_psu_test/can_psu_test
 ```
 
 ### 1. Bring up the CAN interface
