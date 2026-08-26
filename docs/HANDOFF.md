@@ -25,61 +25,14 @@ ELMB, write a **custom OPC-UA client** to replace WinCC OA, and produce a correc
   temperature monitor. Run `./tests/can_diag.py` before touching anything.
 - **Never run two CANopen masters on one bus.** While the OPC-UA server is up,
   only `scan` and `dump` are safe from `lib/elmbpsu_can.py`.
+- The three reference repos are **pinned to the exact commits that were read**
+  (the hashes are in `setup.sh`), because REFERENCE.md cites specific files and
+  an upstream change would silently invalidate a citation. `--latest` takes
+  master instead, at that risk.
 
 ---
 
-## 2. Layout
-
-```
-can_psu_test/                         the git repo and working directory
-├── setup.sh                          restores the workspace: refs, venv, checks
-├── README.md                         the full write-up
-├── config/
-│   ├── README.md                     which parameters to change
-│   ├── config-elmbpsu.xml            CanOpenOpcUa crate config
-│   └── ServerConfig-elmbpsu.xml      OPC-UA endpoint config (port 48012)
-├── lib/
-│   ├── elmbpsu_can.py                SocketCAN tool, zero dependencies
-│   ├── elmbpsu_opcua.py              OPC-UA client (the WinCC OA replacement)
-│   └── elmbpsu_server.py             start/stop the CanOpenOpcUa server itself
-├── tests/
-│   ├── can_diag.py                   read-only pre-flight (stdlib only)
-│   ├── selftest.py                   offline verification, 27 checks
-│   ├── smoke_test.py                 start server, scan bus, ping, stop server
-│   └── crate_scan.py                 full sweep: occupancy, switching, sensors
-├── docs/                             QUICKSTART, REFERENCE, HANDOFF
-├── .venv/                            built by setup.sh, gitignored
-└── CanOpenOpcUa/  fwElmb/  fwElmbPSU/    reference only, gitignored
-```
-
-```bash
-git clone https://github.com/jimmat92/can_psu_test.git
-cd can_psu_test
-./setup.sh                 # add --ssh if you have a CERN GitLab SSH key
-source .venv/bin/activate
-```
-
-`setup.sh` is idempotent. `--check` verifies without building; `--no-venv` skips
-the venv; `--dest ..` places the reference repos as siblings; `--submodules`
-inits CanModuleMain/LogIt if you intend to build the server.
-
-The reference repos are **pinned to the exact commits that were read** —
-REFERENCE.md cites specific files, and an upstream change could silently
-invalidate a citation. `--latest` takes master instead, at that risk.
-
-| repo | upstream (gitlab.cern.ch) | pinned commit | version |
-|------|---------------------------|---------------|---------|
-| `CanOpenOpcUa` | `atlas-dcs-opcua-servers/CanOpenOpcUa` | `a34bbabfeae8b501150b0d8f47728b8539914d09` | tag `v1.0.0` |
-| `fwElmb` | `atlas-dcs-fwcomponents/fwElmb` | `094ecdd25ad5a3f19a1e37f4fa9415992e1bb426` | `9.4.6-15-g094ecdd` |
-| `fwElmbPSU` | `atlas-dcs-fwcomponents/fwElmbPSU` | `101665b1983da85d56c65fb449fb22f298ca2468` | tag `9.2.3` |
-
-All three are on CERN GitLab and may need credentials (a personal access token as
-the HTTPS password, or an SSH key). `ElmbPsuIntroduction.pdf` needs no separate
-fetch — an identical copy ships inside `fwElmbPSU/source/`.
-
----
-
-## 3. Status
+## 2. Status
 
 | | state |
 |---|---|
@@ -93,7 +46,7 @@ fetch — an identical copy ships inside `fwElmbPSU/source/`.
 
 ---
 
-## 4. This crate
+## 3. This crate
 
 **Node id is 57 (0x39), not the factory default 63.** A bus scan on `can13` at
 125 kbit/s found exactly one node — the cause of the server's initial
@@ -140,7 +93,7 @@ for a crate whose `aiTransmissionType` is not 1.
 
 ---
 
-## 5. This machine (`pcaticstest08`, 2026-08-25)
+## 4. This machine (`pcaticstest08`, 2026-08-25)
 
 **Shared.** Other users (`jsouter`, `kapoplaw`, `nkanello`) run WinCC OA projects
 and CanOpenOpcUa here. Re-check with `./tests/can_diag.py` rather than trusting

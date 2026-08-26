@@ -37,7 +37,8 @@ read-only reference, gitignored, never imported.
 ```bash
 git clone https://github.com/jimmat92/can_psu_test.git
 cd can_psu_test
-./setup.sh                 # add --ssh if you have a CERN GitLab SSH key
+./setup.sh                 # --ssh if you have a CERN GitLab SSH key;
+                           # over HTTPS, use a personal access token as the password
 source .venv/bin/activate
 ```
 
