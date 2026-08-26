@@ -93,7 +93,7 @@ fetch — an identical copy ships inside `fwElmbPSU/source/`.
 | `lib/elmbpsu_opcua.py` | **verified end-to-end against the real crate** on 2026-08-25 |
 | `config/config-elmbpsu.xml` | **verified against the real crate** — server comes up, node table populates |
 | `tests/can_diag.py` | verified both ways: detected a live server, correctly rejected sshd/cups/postfix |
-| `tests/crate_scan.py` | **run against the crate repeatedly on 2026-08-26** and its verdicts confirmed there; those runs are what exposed the settling bug in §6.13 |
+| `tests/crate_scan.py` | **verified against the real crate** — occupancy, switching and sensor verdicts all confirmed there |
 | the crate | answers, switches, and reports sensible voltages and currents. Checked, and not the suspect for module-level faults. |
 
 ---
@@ -188,11 +188,10 @@ see them either.
 - **Two CanOpenOpcUa builds are installed.** `/opt/labTempMonitor/bin/` is the
   tagged **v0.10.1** (28 Jun 2026) — use this one, it is what the lab runs.
   `/opt/CanOpenOpcUa/bin/` is a newer **v0.10.2-2-gf7bf9aa-dirty** pipeline build
-  (20 Jul 2026). Both run and resolve their libraries. An early draft assumed the
-  latter, from `CanOpenOpcUa/Documentation/ExampleConfiguration/config-vcan0.xml`.
-- Python is **3.9.25** at `/usr/bin/python3`. A 3.13.1 under `/usr/local/bin` has
-  since disappeared, so **keep the tools 3.6-compatible**. `socket.AF_CAN` and
-  `CAN_RAW` are present; `python-can` is not installed and not needed.
+  (20 Jul 2026). Both run and resolve their libraries.
+- Python is **3.9.25** at `/usr/bin/python3`, and the tools are **kept
+  3.6-compatible**. `socket.AF_CAN` and `CAN_RAW` are present; `python-can` is
+  not installed and not needed.
 - `.venv` therefore gets **asyncua 1.1.8**, the last release supporting 3.9.
   `~/.local/lib/python3.9/site-packages` also has 1.1.8, but the venv ignores user
   site-packages and installs its own.
@@ -204,65 +203,3 @@ see them either.
   dry run is impossible. Use a free real port.
 
 ---
-
-## 6. Corrections made along the way
-
-Recorded because each was believed and acted on before being disproved.
-
-**From the earlier ChatGPT session (`initial_discussion.txt`):**
-
-1. Left the branch→bit mapping open. Resolved from the framework source: bit N =
-   branch N.
-2. Gave the server flag as `-c`. Only `--config_file`, or positional, exists.
-3. Claimed the repo has no ELMB PSU config and the def files might be missing.
-   They are in `CanOpenOpcUa/bin/` and
-   `CanOpenOpcUa/Documentation/ExampleConfiguration/`; we inlined their content.
-
-Its claims about terminators, the separate control bus, floating outputs, and
-"powering the crate does not enable the branches" are all correct and confirmed.
-
-**From this project's own earlier revisions:**
-
-4. Claimed **no CAN hardware on the machine**. There are four SysTec adapters.
-5. Described a nested `can_psu_test/can_psu_test/` layout with the reference
-   repos as siblings. Wrong; see §2.
-6. **Recommended `settings="DontConfigure"`,** inferred from `Design.xml` intent.
-   It fails on both installed builds; reverted to `settings="125k"` + privileges
-   (REFERENCE.md §6).
-7. **Hypothesised an old-style crate (0 = ON)** from `DO word = 0xFFFF` plus a
-   0 V meter reading. Acting on it would have switched every branch off — the
-   populated branches read ~12 V with all bits at 1.
-8. Claimed `elmbpsu_opcua.py` has no `--invert`. It does.
-9. `mon` defaulted to `--source sdo`, which returns `Bad` here. Now `tpdo`.
-10. `--method rpdo` wrote per-branch Booleans and hit the RPDO cache trap for
-    real. Now writes the full 16-bit word (REFERENCE.md §6), verified with a
-    no-op write of the already-latched value so no hardware state was changed.
-11. `tests/crate_scan.py` read `stateAsText` the moment the endpoint opened and
-    died with `BadWaitingForInitialData` (2026-08-26) — the endpoint being up is
-    not the crate answering (REFERENCE.md §6). Both test scripts now use
-    `PsuCrate.wait_ready()`.
-12. Same script, other half of the same trap, reported 2026-08-26: the first run
-    after a crate **power cycle** aborted on `node is PRE-OPERATIONAL` and only a
-    re-run worked. The ELMB boots into PRE-OPERATIONAL and the server needs a
-    node-guard cycle or two to drive it to OPERATIONAL. It now waits for
-    OPERATIONAL rather than for the first readable state.
-13. Cutting the scan's waits (2026-08-26) made it read the analog cache about a
-    second after each switch, and **every module came back failing to switch** —
-    the rails and the ELMB's ADC are both slower than that, so the scan was
-    partly reading pre-switch values (REFERENCE.md §6). It now waits for the
-    rails to hold still, and reports a rail it could not judge as unjudged
-    instead of as a fault.
-
----
-
-## 7. Open items
-
-None. The list was reviewed and cleared on 2026-08-26: the crate scan has been
-run against the crate repeatedly, the branches come back in the right state, the
-`syncIntervalMs` advice lives in [../config/README.md](../config/README.md) and
-in the scan's own start-up line, and the DO bit is settled (REFERENCE.md §4).
-
-One thing to know rather than to do: the last two changes to
-`tests/crate_scan.py` — polling four times per settle window instead of every
-SYNC, and dropping the temporary config file — have not been exercised on the
-crate yet.

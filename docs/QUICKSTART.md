@@ -67,6 +67,9 @@ sudo /opt/labTempMonitor/bin/CanOpenOpcUa \
     --lSdo INF --lNodeMgmt INF --print_cobids_tables
 ```
 
+`--l<Component> <ERR|WRN|INF|DBG|TRC>` sets a per-component log level;
+`--help` lists the components.
+
 Detached: prefix `nohup`, append `> server.log 2>&1 &`, then `tail -f
 server.log`. Not as root: `setcap cap_net_admin+ep` on a private copy of the
 binary.
@@ -199,19 +202,13 @@ elmbpsu-smoketest
 
 ### Full crate scan
 
-Once the smoke test passes, `tests/crate_scan.py` characterises the crate: all
-64 analog inputs as found, then everything off, then everything on, then N
-repeats for a mean and variance per channel.
+Once the smoke test passes, `elmbpsu-cratescan` characterises the crate: which
+slots hold a module, whether each branch switches off and back on, and whether
+the sensors read sensibly. It starts and stops its own server.
 
 ```bash
-elmbpsu-cratescan                       # 5 repeats, starts and stops the server
-elmbpsu-cratescan -v                    # every table behind the verdict
-elmbpsu-cratescan -n 20 --json scan.json
-elmbpsu-cratescan --skip-switch-test    # read-only: switches nothing
-elmbpsu-cratescan --use-running-server  # attach to a server already up
+elmbpsu-cratescan
 ```
-
-By default it prints a slot map and one line per module, nothing else:
 
 ```
   [0]  <-- populated
@@ -220,55 +217,17 @@ By default it prints a slot map and one line per module, nothing else:
   Module 0: OK
   Module 1: FAIL (fails to turn on: branches 2, 3 CAN V+AD V = 0.00 V)
   Module 2: FAIL (current sensor does not work: branches 4, 5 AD I = 0.31 V at the ADC pin)
-  Module 3: UNKNOWN (on/off could not be judged -- the rails had not settled: ...)
 ```
 
-Exit status: **0** nothing found, **1** something is faulty, **2** nothing
-faulty but something could not be judged — which is not a pass.
+Exit status **0** clean, **1** a module is faulty, **2** something could not be
+judged — re-run. Findings are per slot because a module spans two branches, and
+a fault it names is a **module** fault: the divider and the transducer are both
+in the module, so the crate is not in the signal path
+([REFERENCE.md](REFERENCE.md) §4).
 
-Findings are **per slot, not per branch** — a module spans branches `2*slot`
-and `2*slot+1`, so a fault on either condemns that one module. It checks:
-
-- which slots hold a module, and which are empty;
-- on/off, on the command path (DO read-back) and the physical one. At or below
-  `--v-off-max` (1 V) is off; **anything above it has switched on**, healthy or
-  not;
-- the level: a commanded-on rail further than `--v-tol` (2 V) from
-  `--v-nominal` (12 V) is an abnormal output, reported apart from failing to
-  switch;
-- whether each sensor reads something plausible *and* steadily. Both halves
-  matter: a sense line that nothing drives sits rock steady at a few hundred
-  mV, so a stdev test alone would pass it.
-
-**A fault it names is a module fault** — the voltage divider and the current
-transducer are both in the module, so the crate is not in the signal path.
-
-**It waits for the rails to hold still after each switch**, rather than reading
-the next scan. The ELMB sweeps its 64 inputs about once every 11 s, so a scan
-taken straight after a switch holds pre-switch values — that is what makes a
-healthy module look like it failed to switch ([REFERENCE.md](REFERENCE.md) §6).
-Every wait is one sweep or more: `--settle-window` (12 s), `--sample-interval`
-(12 s), `--settle-timeout` (48 s). A rail still moving when the wait ends is
-reported as **unjudged**, per channel, not as a fault.
-
-Presence is decided from the **current** inputs. A voltage input reads ~0
-whether the branch is off or the slot is empty, but the module's transducer
-holds its input at 2.5 V even with the branch switched off, and the input floats
-only when there is no module. That is why the all-off step is a measurement and
-not just a switch test ([REFERENCE.md](REFERENCE.md) §4).
-
-**It power-cycles every branch.** Use `--skip-switch-test` if anything is
-plugged in that should not be.
-
-A default run is **~150 s** with the shipped config, and the two waits it is
-made of are both real: the ELMB's sweep (five repeat scans one sweep apart is
-60 s) and `syncIntervalMs`, which rounds every wait up to a whole SYNC — 10 s
-each. Two levers: `-n 3` saves ~25 s, and setting `syncIntervalMs` to 1000 in
-`config/config-elmbpsu.xml` ([../config/README.md](../config/README.md)) saves
-~45 s. The sweep is the crate's own pace and cannot be shortened.
-
-`--json` gets the per-channel mean and variance, the three state measurements
-as engineering values, and every finding — not the raw samples.
+**It power-cycles every branch**, and takes ~150 s — it waits out the ELMB's own
+sampling sweep after each switch ([REFERENCE.md](REFERENCE.md) §6). `--help` has
+the read-only mode, the thresholds and the rest.
 
 ---
 

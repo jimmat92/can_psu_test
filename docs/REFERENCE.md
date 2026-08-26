@@ -329,28 +329,6 @@ It defaults to `<directory of the binary>/ServerConfig.xml` via
 `getApplicationPath()`, **not** the CWD (`BaseQuasarServer.cpp:308`; `--help`
 prints the resolved path). See [../config/README.md](../config/README.md).
 
-### Command line
-
-From `Server/src/BaseQuasarServer.cpp`: `--config_file` (also positional),
-`--opcua_backend_config`, `--create_certificate`, `--help/-h`, `--version/-v`,
-`--version_extra`. **There is no `-c` short option.**
-
-Project extras from `Server/src/QuasarServer.cpp`: `--l<Component> <LEVEL>` where
-Component ∈ {CanModule, Emergency, NodeMgmt, Rpdo, Sdo, SdoValidator, Spooky,
-Spy, NmTpdo, MTpdo} and LEVEL ∈ {ERR,WRN,INF,DBG,TRC}; plus `--Wall`, `--Wnone`,
-`--W<warning>`, `--Wno_<warning>`, `--force_dont_reconfigure`, `--map_to_vcan`,
-`--print_cobids_tables`.
-
-### Lifecycle
-
-Starts fine under `nohup ... &`, binds the endpoint, and **exits cleanly on plain
-SIGTERM** (`kill <pid>`) as well as SIGINT. `systemd-run --user` also works, but
-this account cannot read the user journal (and `Linger=no`), so redirect stdout
-and stderr to a file regardless of method. Security is `None` with
-`EnableAnonymous=true`, and the PKI paths in `ServerConfig.xml`
-(`/localdisk/tmp/PKI/CA/certs/`) exist and are world-writable, so there is no
-certificate work to do.
-
 ### The RPDO cache trap
 
 **`RPDO1.branchNN` is a quasar `RpdoCachedVariable`. Writing one
@@ -472,14 +450,6 @@ report says so: it counts bit-identical consecutive readings and names the
   `lib/elmbpsu_opcua.py` resolves it at runtime rather than assuming.
 - quasar declares these nodes as `BaseDataType`, so an **untyped write is
   rejected**; the client writes explicitly-typed Variants.
-
-### Building it
-
-**Not buildable as-is** — the `CanModuleMain` and `LogIt` submodule directories
-are empty (`cd CanOpenOpcUa && git submodule update --init --recursive`). It
-further needs an OPC-UA backend (open62541-compat is the free one), Boost,
-XSD/xerces and the quasar toolchain; `quasar.py` drives the build. If ATLAS DCS
-RPMs are available, installing the prebuilt package is far less work.
 
 ---
 
