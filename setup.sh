@@ -5,24 +5,31 @@
 #   git clone https://github.com/jimmat92/can_psu_test.git
 #   cd can_psu_test
 #   ./setup.sh
+#   source .venv/bin/activate
 #
-# Fetches the three reference repositories that the tools in this repo were
-# reverse-engineered from, pins them to the exact commits that were read, writes
-# the .gitignore, and verifies that every source file cited in HANDOFF.md is
-# present afterwards.
+# Does three things:
+#   1. fetches the three reference repositories that the tools here were
+#      reverse-engineered from, pinned to the exact commits that were read;
+#   2. builds a .venv that knows where everything lives - asyncua installed,
+#      lib/ importable, and the three tools on PATH as elmbpsu-can,
+#      elmbpsu-opcua and can-diag;
+#   3. verifies that every source file cited in docs/REFERENCE.md is present
+#      and that our own tools still pass their offline self-test.
 #
 # The reference repos are READ-ONLY documentation for us: nothing here imports
-# or executes them at runtime. They are pinned because HANDOFF.md cites specific
-# files, and an upstream change could silently invalidate a citation.
+# or executes them at runtime. They are pinned because docs/REFERENCE.md cites
+# specific files, and an upstream change could silently invalidate a citation.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="$SCRIPT_DIR"
+VENV="$SCRIPT_DIR/.venv"
 PIN=1
 SUBMODULES=0
-DO_PIP=0
+DO_VENV=1
 PROTO="https"
+PYTHON=""
 
 # repo | https url path | pinned commit | human-readable version
 REPOS=(
@@ -31,7 +38,7 @@ REPOS=(
   "fwElmbPSU|atlas-dcs-fwcomponents/fwElmbPSU|101665b1983da85d56c65fb449fb22f298ca2468|9.2.3"
 )
 
-# files HANDOFF.md cites - if one of these is missing the workspace is broken
+# files docs/REFERENCE.md cites - if one is missing the workspace is broken
 REQUIRED_FILES=(
   "fwElmbPSU/scripts/libs/fwElmbPSU/fwElmbPSU.ctl"
   "fwElmbPSU/scripts/libs/fwElmbPSU/fwElmbPSUConstants.ctl"
@@ -42,6 +49,16 @@ REQUIRED_FILES=(
   "CanOpenOpcUa/Design/Design.xml"
   "CanOpenOpcUa/bin/CANopen_def_STDELMB_DO_RPDO.xmle"
   "CanOpenOpcUa/bin/ServerConfig.xml"
+)
+
+# our own files, relative to the repo root
+OUR_FILES=(
+  "can_diag.py"
+  "lib/elmbpsu_can.py"
+  "lib/elmbpsu_opcua.py"
+  "tests/selftest.py"
+  "config/config-elmbpsu.xml"
+  "config/ServerConfig-elmbpsu.xml"
 )
 
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -59,11 +76,14 @@ Usage: ./setup.sh [options]
   --ssh            clone over SSH (git@gitlab.cern.ch:...) instead of HTTPS.
                    Use this if you have an SSH key registered with CERN GitLab.
   --latest         clone the tip of master instead of the pinned commits.
-                   Faster and smaller, but HANDOFF.md citations may drift.
+                   Faster and smaller, but doc citations may drift.
   --submodules     also init CanOpenOpcUa's submodules (CanModuleMain, LogIt).
                    Required only if you intend to BUILD the OPC-UA server.
-  --pip            pip install asyncua (needed by elmbpsu_opcua.py only).
-  --check          verify an existing workspace, clone nothing.
+  --no-venv        skip creating .venv. Only elmbpsu_opcua.py needs it;
+                   can_diag.py and elmbpsu_can.py are standard library only.
+  --python PATH    interpreter to build the venv with (default: the newest
+                   python3.X found on PATH).
+  --check          verify an existing workspace, clone nothing, build nothing.
   -h, --help       this message
 
 The repositories live on gitlab.cern.ch and may require CERN credentials.
@@ -80,7 +100,9 @@ while [[ $# -gt 0 ]]; do
     --ssh)        PROTO="ssh"; shift ;;
     --latest)     PIN=0; shift ;;
     --submodules) SUBMODULES=1; shift ;;
-    --pip)        DO_PIP=1; shift ;;
+    --no-venv)    DO_VENV=0; shift ;;
+    --python)     PYTHON="$2"; shift 2 ;;
+    --pip)        shift ;;   # accepted for compatibility; the venv implies it
     --check)      CHECK_ONLY=1; shift ;;
     -h|--help)    usage; exit 0 ;;
     *)            echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -102,7 +124,7 @@ write_gitignore() {
 /fwElmb/
 /fwElmbPSU/
 
-# Optional trees, not required by anything here (see HANDOFF.md section 8).
+# Optional trees, not required by anything here (see docs/HANDOFF.md).
 /fwInstallation-*/
 /jcop-framework-*/
 
@@ -166,10 +188,82 @@ clone_one() {
   fi
 }
 
+# ---------------------------------------------------------------- venv
+pick_python() {
+  if [[ -n "$PYTHON" ]]; then echo "$PYTHON"; return; fi
+  local c
+  for c in python3.13 python3.12 python3.11 python3.10 python3.9 python3; do
+    if command -v "$c" >/dev/null 2>&1 \
+       && "$c" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,6) else 1)' 2>/dev/null \
+       && "$c" -c 'import venv' 2>/dev/null; then
+      command -v "$c"; return
+    fi
+  done
+}
+
+make_venv() {
+  local py
+  py="$(pick_python)"
+  if [[ -z "$py" ]]; then
+    fail "no python3 with the venv module found - install python3-venv, or pass --no-venv"
+    return 1
+  fi
+
+  if [[ -x "$VENV/bin/python" ]]; then
+    ok "venv already present at $VENV ($("$VENV/bin/python" -V 2>&1))"
+  else
+    info "Creating venv at $VENV with $py ($("$py" -V 2>&1))"
+    "$py" -m venv "$VENV"
+    ok "venv created"
+  fi
+
+  info "Installing asyncua into the venv"
+  if "$VENV/bin/python" -m pip install --quiet --upgrade pip >/dev/null 2>&1; then :; fi
+  if "$VENV/bin/python" -m pip install --quiet asyncua; then
+    ok "asyncua $("$VENV/bin/python" -c 'import asyncua;print(asyncua.__version__)')"
+  else
+    warn "pip install asyncua failed (no network?) - elmbpsu_opcua.py will not run"
+  fi
+
+  # --- make lib/ importable from inside the venv, from any directory --------
+  local sp
+  sp="$("$VENV/bin/python" -c 'import sysconfig;print(sysconfig.get_paths()["purelib"])')"
+  printf '%s\n' "$SCRIPT_DIR/lib" > "$sp/can_psu_test.pth"
+  ok "lib/ on the venv import path (import elmbpsu_can works anywhere)"
+
+  # --- console entry points -------------------------------------------------
+  wrapper() {   # wrapper <name> <script-relative-to-repo>
+    cat > "$VENV/bin/$1" <<WRAP
+#!/usr/bin/env bash
+# generated by setup.sh - do not edit, re-run ./setup.sh instead
+exec "$VENV/bin/python" "$SCRIPT_DIR/$2" "\$@"
+WRAP
+    chmod +x "$VENV/bin/$1"
+  }
+  wrapper elmbpsu-can   lib/elmbpsu_can.py
+  wrapper elmbpsu-opcua lib/elmbpsu_opcua.py
+  wrapper can-diag      can_diag.py
+  wrapper elmbpsu-selftest tests/selftest.py
+  ok "elmbpsu-can, elmbpsu-opcua, can-diag, elmbpsu-selftest on PATH once activated"
+
+  # --- repo paths as environment variables ---------------------------------
+  if ! grep -q '# >>> can_psu_test >>>' "$VENV/bin/activate" 2>/dev/null; then
+    cat >> "$VENV/bin/activate" <<ENVBLOCK
+
+# >>> can_psu_test >>>
+# added by setup.sh - repo paths, so commands do not depend on your cwd
+export CAN_PSU_TEST="$SCRIPT_DIR"
+export CAN_PSU_CONFIG="$SCRIPT_DIR/config"
+# <<< can_psu_test <<<
+ENVBLOCK
+  fi
+  ok "CAN_PSU_TEST and CAN_PSU_CONFIG exported on activate"
+}
+
 # ---------------------------------------------------------------- verify
 verify() {
   local rc=0
-  info "Verifying reference sources cited by HANDOFF.md"
+  info "Verifying reference sources cited by docs/REFERENCE.md"
   for f in "${REQUIRED_FILES[@]}"; do
     if [[ -f "$DEST/$f" ]]; then
       ok "$f"
@@ -181,6 +275,11 @@ verify() {
     fi
   done
 
+  info "Verifying the repo layout"
+  for f in "${OUR_FILES[@]}"; do
+    if [[ -f "$SCRIPT_DIR/$f" ]]; then ok "$f"; else fail "$f  MISSING"; rc=1; fi
+  done
+
   info "Verifying the toolchain"
   if command -v python3 >/dev/null; then
     ok "python3 $(python3 -c 'import platform;print(platform.python_version())')"
@@ -188,43 +287,54 @@ verify() {
     fail "python3 not found"; rc=1
   fi
   if python3 -c 'import socket; raise SystemExit(0 if hasattr(socket,"AF_CAN") else 1)' 2>/dev/null; then
-    ok "socket.AF_CAN available (elmbpsu_can.py needs nothing else)"
+    ok "socket.AF_CAN available (lib/elmbpsu_can.py needs nothing else)"
   else
-    fail "socket.AF_CAN missing - elmbpsu_can.py needs Linux SocketCAN support"; rc=1
+    fail "socket.AF_CAN missing - lib/elmbpsu_can.py needs Linux SocketCAN support"; rc=1
   fi
-  if python3 -c 'import asyncua' 2>/dev/null; then
-    ok "asyncua $(python3 -c 'import asyncua;print(asyncua.__version__)')"
-  else
-    warn "asyncua not installed - elmbpsu_opcua.py will not run (./setup.sh --pip)"
+  if [[ -x "$VENV/bin/python" ]]; then
+    if "$VENV/bin/python" -c 'import asyncua' 2>/dev/null; then
+      ok "venv asyncua $("$VENV/bin/python" -c 'import asyncua;print(asyncua.__version__)')"
+    else
+      warn "venv exists but asyncua is not installed - re-run ./setup.sh"
+    fi
+    if "$VENV/bin/python" -c 'import elmbpsu_can' 2>/dev/null; then
+      ok "venv can import elmbpsu_can from lib/"
+    else
+      warn "venv cannot import elmbpsu_can - re-run ./setup.sh to rewrite the .pth"
+    fi
+  elif [[ $DO_VENV -eq 1 ]]; then
+    warn "no venv at $VENV - run ./setup.sh without --no-venv"
   fi
   for t in ip candump; do
     if command -v "$t" >/dev/null; then ok "$t"; else warn "$t not found"; fi
   done
   if ls /sys/class/net | grep -q '^can\|^vcan'; then
     ok "CAN interface present: $(ls /sys/class/net | grep '^can\|^vcan' | tr '\n' ' ')"
-  else
-    warn "no CAN interface - see HANDOFF.md section 6 before testing hardware"
-  fi
-  if ls /sys/class/net | grep -q '^can\|^vcan'; then
     info "Which of them are free: ./can_diag.py"
+  else
+    warn "no CAN interface - see docs/HANDOFF.md before testing hardware"
   fi
 
   info "Verifying our own tools"
-  if python3 "$SCRIPT_DIR/selftest.py" >/dev/null 2>&1; then
-    ok "selftest.py passes"
+  if python3 "$SCRIPT_DIR/tests/selftest.py" >/dev/null 2>&1; then
+    ok "tests/selftest.py passes"
   else
-    fail "selftest.py FAILED - run it directly to see why"; rc=1
+    fail "tests/selftest.py FAILED - run it directly to see why"; rc=1
   fi
-  if python3 -c "import xml.dom.minidom as m; m.parse('$SCRIPT_DIR/config-elmbpsu.xml')" 2>/dev/null; then
-    ok "config-elmbpsu.xml is well-formed"
-  else
-    fail "config-elmbpsu.xml is not well-formed"; rc=1
-  fi
-  if python3 -c "import ast,sys; ast.parse(open('$SCRIPT_DIR/can_diag.py').read())" 2>/dev/null; then
-    ok "can_diag.py parses - run ./can_diag.py before taking a CAN port"
-  else
-    fail "can_diag.py does not parse"; rc=1
-  fi
+  for x in config/config-elmbpsu.xml config/ServerConfig-elmbpsu.xml; do
+    if python3 -c "import xml.dom.minidom as m; m.parse('$SCRIPT_DIR/$x')" 2>/dev/null; then
+      ok "$x is well-formed"
+    else
+      fail "$x is not well-formed"; rc=1
+    fi
+  done
+  for s in can_diag.py lib/elmbpsu_can.py lib/elmbpsu_opcua.py; do
+    if python3 -c "import ast; ast.parse(open('$SCRIPT_DIR/$s').read())" 2>/dev/null; then
+      ok "$s parses"
+    else
+      fail "$s does not parse"; rc=1
+    fi
+  done
   return $rc
 }
 
@@ -233,6 +343,7 @@ echo
 info "ELMB PSU workspace setup"
 echo "    repo      : $SCRIPT_DIR"
 echo "    reference : $DEST"
+echo "    venv      : $([[ $DO_VENV -eq 1 ]] && echo "$VENV" || echo "(skipped)")"
 echo
 
 if [[ $CHECK_ONLY -eq 0 ]]; then
@@ -241,16 +352,17 @@ if [[ $CHECK_ONLY -eq 0 ]]; then
     IFS='|' read -r name path commit version <<< "$entry"
     clone_one "$name" "$path" "$commit" "$version"
   done
-  if [[ $DO_PIP -eq 1 ]]; then
-    info "Installing asyncua"
-    python3 -m pip install --quiet asyncua && ok "asyncua installed"
+  if [[ $DO_VENV -eq 1 ]]; then
+    make_venv || true
   fi
   echo
 fi
 
 if verify; then
   echo
-  info "Workspace ready. Next: QUICKSTART.md"
+  info "Workspace ready."
+  [[ $DO_VENV -eq 1 ]] && echo "    source .venv/bin/activate"
+  echo "    Next: docs/QUICKSTART.md"
   exit 0
 else
   echo

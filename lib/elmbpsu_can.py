@@ -7,7 +7,8 @@ CPython's socket module.  Intended for bench testing and diagnosis *before*
 CanOpenOpcUa / WinCC OA are in the picture.
 
 Object dictionary / mapping facts, all reverse-engineered from the JCOP
-framework sources shipped alongside this file:
+framework sources that setup.sh clones into the repository root
+(../fwElmbPSU/, ../fwElmb/).  See docs/REFERENCE.md for the full derivation:
 
   fwElmbPSU/scripts/libs/fwElmbPSU/fwElmbPSU.ctl  fwElmbPSU_createPowerControl()
       branch 0..7   -> ELMB digital output port C, bit = branch

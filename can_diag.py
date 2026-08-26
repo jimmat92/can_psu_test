@@ -9,7 +9,7 @@ Answers three questions before you touch the crate:
   3. Which of them are in use by somebody else, and which are free to take?
 
 This matters because two CANopen masters on one bus will fight over the same
-node (QUICKSTART.md step 3 warns about this), and because CanOpenOpcUa opens
+node (docs/QUICKSTART.md step 3 warns about this), and because CanOpenOpcUa opens
 the SocketCAN port exclusively enough that a second server on the same port is
 a guaranteed bad time.
 
@@ -904,20 +904,21 @@ def report_usage(args, ifaces, receivers, hints, opcua=None):
         pick = (free or idle)[0]
         rec = ifaces[pick]
         print()
-        print("  For the ELMB PSU control bus (125 kbit/s, node 63 by default):")
+        print("  For the ELMB PSU control bus (125 kbit/s; scan reports the node id,")
+        print("  which is 63 only on a factory-default crate):")
         print()
         if rec["up"] and rec["bitrate"] == 125000:
-            print("    ./elmbpsu_can.py --iface %s scan" % pick)
+            print("    ./lib/elmbpsu_can.py --iface %s scan" % pick)
         else:
             print("    sudo ip link set %s down" % pick)
             print("    sudo ip link set %s type can bitrate 125000" % pick)
             print("    sudo ip link set %s up" % pick)
-            print("    ./elmbpsu_can.py --iface %s scan" % pick)
+            print("    ./lib/elmbpsu_can.py --iface %s scan" % pick)
         print()
-        print("  Then set Bus/@port in config-elmbpsu.xml to \"%s\"." % pick)
+        print("  Then set Bus/@port in config/config-elmbpsu.xml to \"%s\"." % pick)
     if busy:
         print()
-        print("  Do not run elmbpsu_can.py against %s: a second CANopen master on a"
+        print("  Do not run lib/elmbpsu_can.py against %s: a second CANopen master on a"
               % busy[0])
         print("  bus that already has one will collide on SDO transfers and can")
         print("  switch branches out from under the other operator.")

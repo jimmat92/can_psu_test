@@ -12,7 +12,8 @@
           with config_file = this file, and
           with opcua_backend_config = ServerConfig-elmbpsu.xml next to it.
           (Both flags take a leading double dash, which cannot be written
-          inside an XML comment. See QUICKSTART.md step 3 for the exact line.)
+          inside an XML comment. See config/README.md, or docs/QUICKSTART.md
+          step 3, for the exact command line.)
           The opcua_backend_config flag is NOT optional: its default is the
           ServerConfig.xml beside the binary, which asks for port 33815 and
           collides with the running lab temperature monitor.
@@ -40,8 +41,8 @@
     Node/@id       - currently 57 (0x39), confirmed by a bus scan on 2026-08-25.
                      63 (0x3F) is only the factory default; this crate is not
                      on it. Always confirm with a bus scan:
-                       ./elmbpsu_can.py (iface can13) scan
-                     See QUICKSTART.md step 4 for the exact command line.
+                       ./lib/elmbpsu_can.py (iface can13) scan
+                     See docs/QUICKSTART.md step 4 for the exact command line.
 
   BRANCH -> BIT MAP (from fwElmbPSU_createPowerControl + fwElmbUser_setDoBits):
     branch 0..7  -> port C bit 0..7   -> do_write bits  0..7  (RPDO1 byte 0)

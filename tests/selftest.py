@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Offline self-test: simulates an ELMB responder so the CANopen encode/decode,
 branch mapping and unit conversions can be exercised without hardware."""
-import struct, sys, importlib.util
+import os, struct, sys
 
-spec = importlib.util.spec_from_file_location("t", "elmbpsu_can.py")
-t = importlib.util.module_from_spec(spec); spec.loader.exec_module(t)
+# Import the module under test from ../lib, whatever the current directory is.
+# setup.sh also drops a .pth into .venv so "import elmbpsu_can" works after
+# activation; this fallback keeps the test runnable without the venv.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "lib"))
+import elmbpsu_can as t
 
 NODE = 63
 

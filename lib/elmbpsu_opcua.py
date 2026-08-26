@@ -3,9 +3,13 @@
 OPC-UA client for controlling an ELMB PSU crate through the CERN
 CanOpenOpcUa server -- a stand-in for WinCC OA + fwElmbPSU + fwElmb.
 
-Requires:  pip install asyncua
-Server:    /opt/CanOpenOpcUa/bin/CanOpenOpcUa -c config-elmbpsu.xml
-           (use the config-elmbpsu.xml shipped next to this script)
+Requires:  asyncua.  ./setup.sh builds a .venv with it; then
+           "source .venv/bin/activate" puts this script on PATH as
+           "elmbpsu-opcua".
+Server:    sudo /opt/labTempMonitor/bin/CanOpenOpcUa
+             --config_file          $CAN_PSU_CONFIG/config-elmbpsu.xml
+             --opcua_backend_config $CAN_PSU_CONFIG/ServerConfig-elmbpsu.xml
+           Both flags are mandatory; see config/README.md.
 
 Address-space layout produced by that config (quasar builds string node ids
 by dot-joining the object hierarchy under the Objects folder):
@@ -167,7 +171,7 @@ def cmd_switch(crate, args, turn_on):
     after = crate.do_word()
     print(f"  read back    0x{after:04X}")
     if after != want:
-        print("  *** READ-BACK MISMATCH ***  see the troubleshooting notes in README.md")
+        print("  *** READ-BACK MISMATCH ***  see the troubleshooting ladder in README.md s6")
         if args.method == "sdo" and before != 0 and after == 0:
             print("  (all bits cleared: the server's RPDO cache was stale. It is "
                   "now in sync;\n   re-issue the command, or use --method rpdo.)")
@@ -232,8 +236,8 @@ def main():
     p = argparse.ArgumentParser(
         description="Control an ELMB PSU crate via the CanOpenOpcUa OPC-UA server.")
     p.add_argument("--endpoint", default="opc.tcp://localhost:48012")
-    p.add_argument("--bus", default="psuCtrlBus", help="Bus name in config-elmbpsu.xml")
-    p.add_argument("--node", default="psuCrate1", help="Node name in config-elmbpsu.xml")
+    p.add_argument("--bus", default="psuCtrlBus", help="Bus name in config/config-elmbpsu.xml")
+    p.add_argument("--node", default="psuCrate1", help="Node name in config/config-elmbpsu.xml")
     p.add_argument("--invert", action="store_true",
                    help="old (pre-2.0.0) PSU: output level 0 means ON")
     sub = p.add_subparsers(dest="cmd", required=True)

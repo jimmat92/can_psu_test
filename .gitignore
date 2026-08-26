@@ -5,7 +5,7 @@
 /fwElmb/
 /fwElmbPSU/
 
-# Optional trees, not required by anything here (see HANDOFF.md section 8).
+# Optional trees, not required by anything here (see docs/HANDOFF.md).
 /fwInstallation-*/
 /jcop-framework-*/
 
