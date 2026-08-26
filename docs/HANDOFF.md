@@ -50,10 +50,12 @@ can_psu_test/                         the git repo and working directory
 │   └── ServerConfig-elmbpsu.xml      OPC-UA endpoint config (port 48012)
 ├── lib/
 │   ├── elmbpsu_can.py                SocketCAN tool, zero dependencies
-│   └── elmbpsu_opcua.py              OPC-UA client (the WinCC OA replacement)
+│   ├── elmbpsu_opcua.py              OPC-UA client (the WinCC OA replacement)
+│   └── elmbpsu_server.py             start/stop the CanOpenOpcUa server itself
 ├── tests/
 │   ├── can_diag.py                   read-only pre-flight (stdlib only)
-│   └── selftest.py                   offline verification, 27 checks
+│   ├── selftest.py                   offline verification, 27 checks
+│   └── smoke_test.py                 start server, scan bus, ping, stop server
 ├── docs/
 │   ├── QUICKSTART.md                 operator procedure
 │   ├── REFERENCE.md                  protocol, mappings, server behaviour

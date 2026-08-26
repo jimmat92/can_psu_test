@@ -101,12 +101,32 @@ class PsuCrate:
             return self.read(f"aisdo.aisdo_{channel}")
         return self.read(f"TPDO3.ch{channel}.value")
 
+    def ping(self):
+        """Round-trip through the address space config.xml built, not raw
+        CANopen: read stateAsText, the cheapest node every crate config
+        publishes. Success here means the OPC-UA server, the XML config's
+        node-id naming (<bus>.<node>...), and the CAN link to the ELMB are
+        all working end to end. Returns (ok, state_or_error)."""
+        try:
+            return True, self.state()
+        except Exception as exc:
+            return False, str(exc)
+
 
 def show_branches(word, on_value):
     for b in range(16):
         bit = (word >> b) & 1
         print(f"    {branch_label(b)}: {'ON ' if bit == on_value else 'OFF'}"
               f"   [bit {b} = {bit}]")
+
+
+def cmd_ping(crate, args):
+    ok, result = crate.ping()
+    if not ok:
+        print(f"PING FAILED  {crate.prefix} @ {args.endpoint}: {result}")
+        return 1
+    print(f"PING OK      {crate.prefix} @ {args.endpoint}  stateAsText={result!r}")
+    return 0
 
 
 def cmd_status(crate, args):
@@ -242,6 +262,8 @@ def main():
                    help="old (pre-2.0.0) PSU: output level 0 means ON")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    sub.add_parser("ping", help="cheapest possible read, to confirm the server "
+                    "+ config.xml + CAN link are all up (no low-level CANopen)")
     sub.add_parser("status", help="NMT state, DO configuration, branch states")
 
     for name, doc in (("on", "switch branches ON"), ("off", "switch branches OFF")):
@@ -280,6 +302,8 @@ def main():
             ns = 2
             print(f"warning: namespace {NS_URI!r} not found, assuming ns={ns}")
         crate = PsuCrate(client, ns, args.bus, args.node)
+        if args.cmd == "ping":
+            return cmd_ping(crate, args)
         if args.cmd == "status":
             return cmd_status(crate, args)
         if args.cmd == "on":

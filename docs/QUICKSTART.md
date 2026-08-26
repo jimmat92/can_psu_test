@@ -51,6 +51,17 @@ trouble — fix that before going further.
 This step is optional if you are starting the server: it sets the bitrate itself
 (step 3). It is required for `elmbpsu-can`, which never touches link config.
 
+Or as one call, printing the same state back nicely afterwards:
+
+```bash
+elmbpsu-can --iface can13 linkup
+```
+
+```python
+from elmbpsu_can import bring_up_can
+info = bring_up_can("can13")            # or bring_up_can(13)
+```
+
 ### 3. Start the OPC-UA server
 
 `config/config-elmbpsu.xml` is already set to `port="can13"`, `settings="125k"`
@@ -115,6 +126,25 @@ Sanity check while it starts: the node table it prints should show a real
 `SW Version`. `?.?` means it never exchanged a frame with the crate — wrong node
 id, or the privilege failure above.
 
+**Or let Python own the lifecycle** instead of a second terminal:
+`lib/elmbpsu_server.py` runs the same command under `sudo`, finds its real pid
+with `pgrep -f`, and can stop it with a clean SIGTERM.
+
+```bash
+elmbpsu-server start --wait-port     # blocks until the OPC-UA port is listening
+elmbpsu-server status
+elmbpsu-server stop
+```
+
+Or from a test script, as a context manager:
+
+```python
+from elmbpsu_server import OpcUaServer
+with OpcUaServer() as server:            # start() on entry, stop() on exit
+    server.wait_for_port()
+    ...                                   # drive elmbpsu_opcua.PsuCrate here
+```
+
 ### 4. Debug the CAN bus (only if step 5 comes back empty)
 
 Watch the traffic passively. You should see the server's SYNC and node-guard
@@ -148,6 +178,14 @@ that means the crate is talking and its output pins really are outputs.
 
 ```bash
 elmbpsu-opcua status
+```
+
+Cheaper sanity check first, if you just want to know the server is reachable
+and the config's node-id naming resolves — one read (`stateAsText`), through
+the address space `config-elmbpsu.xml` built, not raw CANopen:
+
+```bash
+elmbpsu-opcua ping
 ```
 
 Or without the server at all, straight over SocketCAN:
@@ -199,6 +237,17 @@ config if you are watching something change.
 
 ```bash
 elmbpsu-opcua off all
+```
+
+### One-shot bring-up check
+
+`tests/smoke_test.py` does steps 3–5 for you: starts the server, bus-scans and
+prints the node id(s) it finds (terminating if the bus is empty), pings the
+crate through the OPC-UA server (terminating if that fails), then always stops
+the server on the way out -- success, a failed check, Ctrl-C, or any error.
+
+```bash
+elmbpsu-smoketest
 ```
 
 ---

@@ -37,8 +37,10 @@ framework sources that setup.sh clones into the repository root
 """
 
 import argparse
+import re
 import socket
 import struct
+import subprocess
 import sys
 import time
 
@@ -95,6 +97,149 @@ SDO_ABORT = {
     0x08000000: "general error",
     0x08000020: "data cannot be transferred/stored to the application",
 }
+
+
+# ---------------------------------------------------------------- link setup
+def _normalize_iface(iface):
+    """Accept "can13" or bare 13/"13" and return "can13" either way."""
+    s = str(iface)
+    return f"can{s}" if s.isdigit() else s
+
+
+def _run(cmd):
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"'{' '.join(cmd)}' failed: {result.stderr.strip() or result.returncode}")
+    return result.stdout
+
+
+def _parse_two_line_block(text, must_contain, strip_prefix=None):
+    """Find the line containing `must_contain`, treat the rest of that line
+    as column headers, and zip them against the next line's tokens ->
+    {header: int}. Extra trailing tokens on either line (some iproute2
+    builds run unrelated device stats onto the same line as the CAN error
+    counters) are ignored because zip() stops at the shorter list, and any
+    non-numeric value is skipped rather than raising -- header names and
+    exact layout have already been seen to differ between kernel/driver
+    builds (e.g. 'overrun' vs 'missed' for the same RX column)."""
+    m = re.search(rf"^[ \t]*(.*{re.escape(must_contain)}.*)\n[ \t]*(.+)$", text, re.MULTILINE)
+    if not m:
+        return {}
+    headers = m.group(1).split()
+    if strip_prefix and headers and headers[0] == strip_prefix:
+        headers = headers[1:]
+    values = m.group(2).split()
+    out = {}
+    for k, v in zip(headers, values):
+        try:
+            out[k] = int(v)
+        except ValueError:
+            pass
+    return out
+
+
+def _parse_link_show(text):
+    """Pull the fields worth reporting out of 'ip -details -statistics link
+    show <iface>' output. Returns {} for anything not found rather than
+    raising -- iproute2 output has drifted across versions before."""
+    info = {}
+    m = re.search(r"^\d+:\s+\S+:\s+<([^>]*)>.*?\bstate\s+(\S+)", text, re.MULTILINE)
+    if m:
+        info["flags"] = m.group(1)
+        info["link_state"] = m.group(2)
+    m = re.search(r"can state (\S+)(?:\s*\(berr-counter tx (\d+) rx (\d+)\))?"
+                 r"\s*restart-ms (\d+)", text)
+    if m:
+        info["can_state"] = m.group(1)
+        info["berr_tx"] = int(m.group(2)) if m.group(2) is not None else None
+        info["berr_rx"] = int(m.group(3)) if m.group(3) is not None else None
+        info["restart_ms"] = int(m.group(4))
+    m = re.search(r"\bbitrate (\d+) sample-point ([\d.]+)", text)
+    if m:
+        info["bitrate"] = int(m.group(1))
+        info["sample_point"] = float(m.group(2))
+    # Extended CAN error counters some drivers report (bus-off is the one
+    # that matters most: >0 means the controller has tripped off the bus).
+    can_errors = _parse_two_line_block(text, "re-started")
+    if can_errors:
+        info["can_errors"] = can_errors
+    rx = _parse_two_line_block(text, "RX:", strip_prefix="RX:")
+    if rx:
+        info["rx"] = rx
+    tx = _parse_two_line_block(text, "TX:", strip_prefix="TX:")
+    if tx:
+        info["tx"] = tx
+    return info
+
+
+def _print_link_summary(iface, info):
+    link_state = info.get("link_state", "?")
+    can_state = info.get("can_state", "?")
+    bitrate = info.get("bitrate", "?")
+    sp = info.get("sample_point", "?")
+    print(f"  {iface}: link {link_state}, CAN {can_state}  "
+          f"bitrate={bitrate} sample-point={sp}")
+    if info.get("berr_tx") is not None:
+        print(f"    bus-error counters: tx={info['berr_tx']} rx={info['berr_rx']}"
+              f"  restart-ms={info['restart_ms']}")
+    if "can_errors" in info:
+        ce = info["can_errors"]
+        print("    CAN error counters: " +
+              "  ".join(f"{k}={v}" for k, v in ce.items()))
+        if ce.get("bus-off", 0) > 0:
+            print(f"    *** bus-off count is {ce['bus-off']} -- the controller has "
+                  "tripped off the bus at least once ***")
+    if "rx" in info:
+        r = info["rx"]
+        detail = "  ".join(f"{k}={v}" for k, v in r.items() if k not in ("bytes", "packets"))
+        print(f"    RX: {r.get('packets', '?')} packets, {r.get('bytes', '?')} bytes"
+              + (f"  ({detail})" if detail else ""))
+    if "tx" in info:
+        t = info["tx"]
+        detail = "  ".join(f"{k}={v}" for k, v in t.items() if k not in ("bytes", "packets"))
+        print(f"    TX: {t.get('packets', '?')} packets, {t.get('bytes', '?')} bytes"
+              + (f"  ({detail})" if detail else ""))
+    if link_state != "UP":
+        print("    *** link is not UP ***")
+    if can_state not in ("?", "ERROR-ACTIVE"):
+        print(f"    *** CAN state is {can_state}, not ERROR-ACTIVE -- "
+              "check bitrate, wiring and the 120 ohm terminators ***")
+
+
+def bring_up_can(iface, bitrate=125000, use_sudo=True, verbose=True):
+    """Bring a SocketCAN interface up at the given bitrate: down, reconfigure,
+    up, then read back and report its state -- the four commands in
+    docs/QUICKSTART.md step 2, as one call:
+
+        sudo ip link set <iface> down
+        sudo ip link set <iface> type can bitrate <bitrate>
+        sudo ip link set <iface> up
+        ip -details -statistics link show <iface>
+
+    `iface` accepts either "can13" or bare 13. Returns the parsed link info
+    dict (see _parse_link_show); raises RuntimeError if any "ip" command
+    fails (most commonly a privilege error -- see docs/QUICKSTART.md step 3
+    for why this needs privileges) or if "ip link show" itself fails.
+    Does NOT raise just because the resulting state looks wrong (e.g.
+    BUS-OFF) -- that is reported in the printed summary and in the returned
+    dict, for the caller to act on.
+    """
+    iface = _normalize_iface(iface)
+    sudo = ["sudo"] if use_sudo else []
+    if verbose:
+        print(f"bringing up {iface} at {bitrate} bit/s ...")
+    for cmd in (sudo + ["ip", "link", "set", iface, "down"],
+                sudo + ["ip", "link", "set", iface, "type", "can", "bitrate", str(bitrate)],
+                sudo + ["ip", "link", "set", iface, "up"]):
+        if verbose:
+            print("    $ " + " ".join(cmd))
+        _run(cmd)
+
+    out = _run(["ip", "-details", "-statistics", "link", "show", iface])
+    info = _parse_link_show(out)
+    if verbose:
+        _print_link_summary(iface, info)
+    return info
 
 
 class CanBus:
@@ -244,18 +389,36 @@ def decode_word(word, on_value):
     return "\n".join(lines)
 
 
+NMT_STATE_NAMES = {0: "BOOTUP", 4: "STOPPED", 5: "OPERATIONAL", 127: "PRE-OPERATIONAL"}
+
+
+def scan_bus(bus, node_range=range(1, 128), timeout=0.05):
+    """Probe node-guard for every id in node_range. Returns a list of
+    (node, state) for the ones that answered -- state is the raw NMT state
+    byte (see NMT_STATE_NAMES), so a non-empty return is your sanity check
+    that *something* is on the bus, and the node ids in it are the ones to
+    point config-elmbpsu.xml's <Node id=...> at.
+
+    Importable directly (no CanOpenOpcUa / OPC-UA involved): e.g.
+        from elmbpsu_can import CanBus, scan_bus
+        with contextlib.closing(CanBus("can13")) as bus:
+            found = scan_bus(bus)
+    """
+    found = []
+    for node in node_range:
+        bus.send(NMT_ERR_BASE + node, rtr=True)
+        data = bus.wait_for(NMT_ERR_BASE + node, timeout)
+        if data:
+            found.append((node, data[0] & 0x7F))
+    return found
+
+
 # ---------------------------------------------------------------- commands
 def cmd_scan(args, bus):
     print(f"Probing node-guard on {args.iface} for node IDs 1..127 ...")
-    found = []
-    for node in range(1, 128):
-        bus.send(NMT_ERR_BASE + node, rtr=True)
-        data = bus.wait_for(NMT_ERR_BASE + node, args.scan_timeout)
-        if data:
-            state = data[0] & 0x7F
-            names = {0: "BOOTUP", 4: "STOPPED", 5: "OPERATIONAL", 127: "PRE-OPERATIONAL"}
-            print(f"  node {node:3d} (0x{node:02X}): {names.get(state, hex(state))}")
-            found.append(node)
+    found = scan_bus(bus, timeout=args.scan_timeout)
+    for node, state in found:
+        print(f"  node {node:3d} (0x{node:02X}): {NMT_STATE_NAMES.get(state, hex(state))}")
     if not found:
         print("  no nodes answered.")
         print("  -> check bitrate (PSU control ELMB default is 125 kbit/s),")
@@ -266,7 +429,7 @@ def cmd_scan(args, bus):
 
 def cmd_info(args, elmb):
     state = elmb.guard()
-    names = {0: "BOOTUP", 4: "STOPPED", 5: "OPERATIONAL", 127: "PRE-OPERATIONAL"}
+    names = NMT_STATE_NAMES
     if state is None:
         print(f"node {args.node} did not answer node guarding")
         return 1
@@ -289,7 +452,7 @@ def cmd_status(args, elmb):
     print(f"--- ELMB PSU crate, control ELMB node {args.node} "
           f"(0x{args.node:02X}) on {args.iface} ---")
     state = elmb.guard()
-    names = {0: "BOOTUP", 4: "STOPPED", 5: "OPERATIONAL", 127: "PRE-OPERATIONAL"}
+    names = NMT_STATE_NAMES
     print(f"NMT state       : {names.get((state or 0) & 0x7F, 'NO REPLY')}")
     for name in ("dioOutputMaskC", "dioOutputMaskA", "doInitHigh"):
         try:
@@ -319,7 +482,7 @@ def cmd_nmt(args, elmb):
     print(f"sent NMT {args.command} to node {args.node}")
     time.sleep(0.3)
     state = elmb.guard()
-    names = {0: "BOOTUP", 4: "STOPPED", 5: "OPERATIONAL", 127: "PRE-OPERATIONAL"}
+    names = NMT_STATE_NAMES
     print(f"state now: {names.get((state or 0) & 0x7F, 'NO REPLY')}")
     return 0
 
@@ -460,6 +623,15 @@ def cmd_outmask(args, elmb):
     return 0
 
 
+def cmd_linkup(args):
+    try:
+        info = bring_up_can(args.iface, bitrate=args.bitrate, use_sudo=not args.no_sudo)
+    except RuntimeError as exc:
+        sys.exit(f"error: {exc}")
+    ok = info.get("link_state") == "UP" and info.get("can_state") == "ERROR-ACTIVE"
+    return 0 if ok else 1
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Direct SocketCAN test tool for the CERN ELMB PSU crate.",
@@ -477,6 +649,12 @@ def main():
 
     s = sub.add_parser("scan", help="probe all node ids on the bus")
     s.add_argument("--scan-timeout", type=float, default=0.05)
+
+    s = sub.add_parser("linkup", help="bring the CAN interface down/reconfigure/up "
+                       "and report its state (needs sudo)")
+    s.add_argument("--bitrate", type=int, default=125000)
+    s.add_argument("--no-sudo", action="store_true",
+                   help="skip sudo (e.g. already root)")
 
     sub.add_parser("info", help="firmware / serial number of the control ELMB")
     sub.add_parser("status", help="read back branch on/off states and DO configuration")
@@ -506,6 +684,10 @@ def main():
                    help="also persist to EEPROM via 0x1010:01")
 
     args = p.parse_args()
+
+    if args.cmd == "linkup":
+        return cmd_linkup(args)
+
     bus = CanBus(args.iface, timeout=args.timeout, verbose=args.verbose)
     elmb = Elmb(bus, args.node, timeout=args.timeout)
 
