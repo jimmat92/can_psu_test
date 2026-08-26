@@ -246,21 +246,21 @@ Comparing a branch switched off against an empty slot:
 | voltage sense | 0.008 V | 0.015 V |
 | current sense | sensor at its 2.5 V zero | ~0.02 V, i.e. undriven |
 
-The branch output is **genuinely dead**, indistinguishable at the sense point
-from an empty slot — not merely isolated behind a relay with a live rail beyond
-it. And the module's monitoring electronics **stay powered**: the transducer
-holds its 2.5 V zero, which it could not do if it were fed from the rail it
-measures. **The bit switches the branch output, not the module.**
+**The bit drives a relay that disconnects the TRACO converter's output** —
+confirmed from the module schematics, 2026-08-26. It is not the converter's
+Remote On/Off input, which is what the readings alone had suggested.
+
+Everything measured follows from that. The voltage divider must sit on the
+**load** side of the relay, since an off branch reads 0.008 V while the
+converter beyond it is presumably still running. The module's monitoring
+electronics **stay powered** — the transducer holds its 2.5 V zero, which it
+could not do if it were fed from the rail it measures — which is what makes the
+occupancy test work. **The bit switches the branch output, not the module.**
 
 The framework agrees on intent: `fwElmbPSU_hardReset()` (`fwElmbPSU.ctl:1500`)
 is switch off → `delay(1)` → switch on, the official way to cold-boot ELMBs
-sitting on a branch. CERN treats this as real removal of power and as routine.
-
-Still open: whether the DO line drives the TRACO converter's Remote On/Off
-(inhibit) pin or a series switch in its output. Inhibit is much the more likely —
-standard TRACO control input, explains one bit switching both rails, and the
-alternative leaves sixteen converters idling unloaded — but nothing measured
-proves it, and it changes nothing operationally.
+sitting on a branch. An opening relay is real removal of power, and CERN treats
+it as routine.
 
 ---
 
@@ -409,8 +409,11 @@ for the state it needs instead of for any state at all.
 Reading the analog cache the moment it refreshes is not the same as reading the
 crate. Two lags sit between a switch command and a number you can trust:
 
-1. **the rails' own rise and fall time** — a converter that has just been
-   inhibited still has charged output capacitors;
+1. **the rails' own rise and fall time.** The relay (§4) makes these
+   asymmetric: closing it drops an already-live converter output onto the
+   branch, so the rise is quick, while opening it leaves the load side to bleed
+   its charge off through whatever is still attached — which can be nothing but
+   the sense divider;
 2. **the ELMB's ADC**, which works through its 64 inputs at its own pace. The
    SYNC-driven TPDO3 set that arrives next carries whatever the ADC had, which
    can be values sampled *before* the switch — and can be a **mix**, some

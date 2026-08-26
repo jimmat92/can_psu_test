@@ -93,7 +93,7 @@ fetch — an identical copy ships inside `fwElmbPSU/source/`.
 | `lib/elmbpsu_opcua.py` | **verified end-to-end against the real crate** on 2026-08-25 |
 | `config/config-elmbpsu.xml` | **verified against the real crate** — server comes up, node table populates |
 | `tests/can_diag.py` | verified both ways: detected a live server, correctly rejected sshd/cups/postfix |
-| `tests/crate_scan.py` | analysis verified offline against replayed measurements; **never yet run against the crate** |
+| `tests/crate_scan.py` | **run against the crate repeatedly on 2026-08-26** and its verdicts confirmed there; those runs are what exposed the settling bug in §6.13 |
 | the crate | answers, switches, and reports sensible voltages and currents. Checked, and not the suspect for module-level faults. |
 
 ---
@@ -257,15 +257,12 @@ Its claims about terminators, the separate control bus, floating outputs, and
 
 ## 7. Open items
 
-1. **Run `elmbpsu-cratescan` against the crate** — its analysis has only ever been
-   exercised on replayed data, and it is now the primary diagnostic.
-2. **Check the branch states** before and after: `elmbpsu-opcua status`, and
-   `on all` if a previous session left branches off.
-3. **Drop `syncIntervalMs` to ~1000** in the config before chasing anything that
-   moves — at 10000 the sampling aliases a rail oscillation into nonsense, and
-   it rounds every wait `elmbpsu-cratescan` makes up to a whole 10 s SYNC.
-4. **Establish what the DO bit drives** — TRACO Remote On/Off versus a series
-   switch. Needs a module in hand; not answerable from software (REFERENCE.md §4)
-   and does not affect operation.
-5. The user has been offered the README as a shareable Artifact page and has not
-   asked for it.
+None. The list was reviewed and cleared on 2026-08-26: the crate scan has been
+run against the crate repeatedly, the branches come back in the right state, the
+`syncIntervalMs` advice lives in [../config/README.md](../config/README.md) and
+in the scan's own start-up line, and the DO bit is settled (REFERENCE.md §4).
+
+One thing to know rather than to do: the last two changes to
+`tests/crate_scan.py` — polling four times per settle window instead of every
+SYNC, and dropping the temporary config file — have not been exercised on the
+crate yet.
