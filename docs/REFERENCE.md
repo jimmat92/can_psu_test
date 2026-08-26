@@ -395,6 +395,60 @@ answers**, and is what a client should use before its first read.
 `tests/smoke_test.py` had been getting away with it only because its bus scan
 happens to take a few seconds first.
 
+**And the crate answering is not the crate being ready.** After a crate power
+cycle the ELMB boots into PRE-OPERATIONAL. The server drives it to
+`Node/@requestedState` from its node-management cycle, so `stateAsText` can
+report PRE-OPERATIONAL for a node-guard period or two before it reports
+OPERATIONAL — and RPDO writes are only acted on in OPERATIONAL. That is why the
+first scan after a power cycle aborted and an immediate re-run succeeded: by
+then the node had got there. `PsuCrate.wait_ready(require="OPERATIONAL")` waits
+for the state it needs instead of for any state at all.
+
+### A fresh TPDO3 set is not a fresh ADC sample
+
+Reading the analog cache the moment it refreshes is not the same as reading the
+crate. Two lags sit between a switch command and a number you can trust:
+
+1. **the rails' own rise and fall time** — a converter that has just been
+   inhibited still has charged output capacitors;
+2. **the ELMB's ADC**, which works through its 64 inputs at its own pace. The
+   SYNC-driven TPDO3 set that arrives next carries whatever the ADC had, which
+   can be values sampled *before* the switch — and can be a **mix**, some
+   channels from before and some from after.
+
+Observed on this crate on 2026-08-26, reading one scan about a second after each
+switch: rails commanded **off** read 11.85–12.79 V, and rails commanded **on**
+read 0.01–0.02 V in the switch scan while the repeat scans a few seconds later
+read 9.5 V on the same rails. Channels of the same branch disagreed with each
+other within one scan. Every module in the crate was reported as failing to
+switch.
+
+### How long one sweep takes
+
+Measured on this crate: repeat scans taken **2 s apart were 82% bit-identical**,
+so only 18% of the channels had been re-converted in between. A sweep therefore
+comes round about every **2 / 0.18 ≈ 11 s** — which is also how long the switch
+phases of that run took to reach the commanded state, one full sweep.
+
+Everything `tests/crate_scan.py` waits for is built on that number
+(`ELMB_SWEEP_S`, 12 s with a little margin):
+
+| wait | why |
+|---|---|
+| `--settle-window` | a rail counts as settled once nothing has moved for one sweep. Any shorter and "nothing moved" only means "the channels the ADC happened to revisit did not move" — the rest are bit-identical because they were never re-converted |
+| `--sample-interval` | repeat scans closer together than one sweep are largely the same conversions read twice, and a variance built from those is a fiction |
+| `--settle-timeout` | four sweeps, then give up and mark **those rails** unjudged |
+
+Two consecutive reads agreeing proves nothing here — both can be stale — which
+is why the comparison is against a scan a full window old, not the previous one.
+Rails still moving when the wait ends are tracked **per channel**, so one module
+bleeding down slowly does not make every other module's verdict unjudgeable, and
+a rail it could not judge is reported as unjudged rather than as a fault.
+
+If a different crate or a different `syncIntervalMs` sweeps at another rate, the
+report says so: it counts bit-identical consecutive readings and names the
+`--sample-interval` that would fix it.
+
 ### Other quasar / CanOpenOpcUa behaviour worth knowing
 
 - The RPDO always transmits **8 data bytes** (`DRpdo.cpp` `m_cache.assign(8,0)`)

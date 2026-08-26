@@ -241,6 +241,17 @@ Its claims about terminators, the separate control bus, floating outputs, and
     died with `BadWaitingForInitialData` (2026-08-26) — the endpoint being up is
     not the crate answering (REFERENCE.md §6). Both test scripts now use
     `PsuCrate.wait_ready()`.
+12. Same script, other half of the same trap, reported 2026-08-26: the first run
+    after a crate **power cycle** aborted on `node is PRE-OPERATIONAL` and only a
+    re-run worked. The ELMB boots into PRE-OPERATIONAL and the server needs a
+    node-guard cycle or two to drive it to OPERATIONAL. It now waits for
+    OPERATIONAL rather than for the first readable state.
+13. Cutting the scan's waits (2026-08-26) made it read the analog cache about a
+    second after each switch, and **every module came back failing to switch** —
+    the rails and the ELMB's ADC are both slower than that, so the scan was
+    partly reading pre-switch values (REFERENCE.md §6). It now waits for the
+    rails to hold still, and reports a rail it could not judge as unjudged
+    instead of as a fault.
 
 ---
 
@@ -250,8 +261,9 @@ Its claims about terminators, the separate control bus, floating outputs, and
    exercised on replayed data, and it is now the primary diagnostic.
 2. **Check the branch states** before and after: `elmbpsu-opcua status`, and
    `on all` if a previous session left branches off.
-3. **Drop `syncIntervalMs` to ~1000** before chasing anything that moves. At
-   10000 the sampling aliases a rail oscillation into nonsense.
+3. **Drop `syncIntervalMs` to ~1000** in the config before chasing anything that
+   moves — at 10000 the sampling aliases a rail oscillation into nonsense.
+   `elmbpsu-cratescan` already does this for its own server run.
 4. **Establish what the DO bit drives** — TRACO Remote On/Off versus a series
    switch. Needs a module in hand; not answerable from software (REFERENCE.md §4)
    and does not affect operation.

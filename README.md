@@ -191,8 +191,9 @@ elmbpsu-smoketest                          # start server, scan bus, ping, stop
 elmbpsu-cratescan -n 10 --json scan.json   # occupancy, switching, sensor health
 ```
 
-`elmbpsu-cratescan` **power-cycles every branch**; `--skip-switch-test` makes it
-read-only. See [docs/QUICKSTART.md](docs/QUICKSTART.md).
+`elmbpsu-cratescan` prints a slot map and one OK/FAIL line per module (`-v` for
+the tables behind it) and **power-cycles every branch**; `--skip-switch-test`
+makes it read-only. See [docs/QUICKSTART.md](docs/QUICKSTART.md).
 
 ## 6. If a branch still shows 0 V after a verified switch-on
 

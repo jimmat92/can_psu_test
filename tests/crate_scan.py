@@ -19,6 +19,10 @@ From those four data sets it answers three questions:
       command path (DO read-back) and the physical path (rail voltage).
     * do the sensors work, and how steady are they (pass/fail on stdev).
 
+The default report is a slot map and one line per module -- OK, or FAIL with
+the reason. -v adds the plan, the four channel tables, the per-branch
+switching detail, the statistics table and the fault list behind that verdict.
+
 How presence is decided (docs/REFERENCE.md s4). The two input types fail
 differently, and that is the whole trick:
 
@@ -56,9 +60,13 @@ from the crate is power-cycled. Use --skip-switch-test for a read-only run.
 import argparse
 import contextlib
 import json
+import os
+import re
 import statistics
 import socket
+import subprocess
 import sys
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -84,6 +92,16 @@ LEM_RANGE_A = 15.0
 LEM_MIN_V = 2.5 - LEM_RANGE_A * 0.625 / 5.0     # 0.625 V
 LEM_MAX_V = 2.5 + LEM_RANGE_A * 0.625 / 5.0     # 4.375 V
 
+SYNC_CONFIG_PREFIX = "config-elmbpsu-sync"      # see faster_sync_config()
+# The ELMB works up its channel list instead of sampling all 64 at once, and
+# on this crate a channel comes round again about every 11 s: 82% of readings
+# taken 2 s apart were bit-identical, i.e. only 18% of the channels had been
+# re-converted (docs/REFERENCE.md s6). Every wait below is built on that -- a
+# window shorter than one sweep judges channels the ADC has not revisited, and
+# repeat scans closer together than one sweep are the same conversions twice.
+ELMB_SWEEP_S = 12.0
+SETTLE_WORD = {"steady": "stopped moving", "timeout": "NEVER SETTLED"}
+
 
 # --------------------------------------------------------------- config
 def bus_interval_s(config_file, attr, fallback=10.0):
@@ -108,8 +126,45 @@ def bus_interval_s(config_file, attr, fallback=10.0):
     return fallback
 
 
+def faster_sync_config(path, ms):
+    """A temp copy of the server config with Bus/@syncIntervalMs lowered to
+    `ms`, or None if it is already at least that fast (or unreadable). A text
+    substitution rather than an XML rewrite, so the copy differs from the
+    original in exactly one number and keeps its comments."""
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return None
+    m = re.search(r'syncIntervalMs="(\d+)"', text)
+    if not m or int(m.group(1)) <= ms:
+        return None
+    text = text[:m.start()] + f'syncIntervalMs="{ms}"' + text[m.end():]
+    fd, tmp = tempfile.mkstemp(prefix=f"{SYNC_CONFIG_PREFIX}{ms}-", suffix=".xml")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+    os.chmod(tmp, 0o644)          # under sudo the server reads it as root
+    return tmp
+
+
+def stale_scan_pid(binary):
+    """A CanOpenOpcUa left over from an earlier scan run, recognised by the
+    temp config those runs hand it. OpcUaServer identifies its process by
+    --config_file, so a run that dies without cleaning up would be invisible
+    to the next one -- which would then start a second CANopen master on the
+    same bus. Matching the binary alone is not safe: the lab temperature
+    monitor is the same binary on another bus."""
+    try:
+        out = subprocess.check_output(
+            ["pgrep", "-f", f"^{re.escape(binary)}.*{SYNC_CONFIG_PREFIX}"],
+            text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return None
+    pids = [int(x) for x in out.split()]
+    return pids[0] if pids else None
+
+
 # ---------------------------------------------------------- measurement
-def wait_for_new_scan(crate, nodes, prev, sync_s, source, margin=1.5, poll=0.5,
+def wait_for_new_scan(crate, nodes, prev, sync_s, source, margin=0.75, poll=0.2,
                       timeout=None):
     """Return (samples, confirmed) once the analog cache holds a scan taken
     after this call started.
@@ -163,6 +218,89 @@ def measure(crate, nodes, prev, sync_s, source, label, quiet=False, timeout=None
     return samples
 
 
+def rail_volts(samples):
+    """The readable voltage channels of one scan, in volts, keyed (branch,
+    key)."""
+    out = {}
+    for b in range(16):
+        ch = branch_channels(b)
+        for k in ("canv", "adv"):
+            s = samples[ch[k]]
+            if s.ok:
+                out[(b, k)] = to_volts(s.uv)
+    return out
+
+
+def moving_rails(a, b, tol):
+    """The voltage channels that moved more than tol between two scans, sorted.
+    None if the two scans have no readable channel in common, which is not the
+    same as nothing moving."""
+    va, vb = rail_volts(a), rail_volts(b)
+    common = set(va) & set(vb)
+    if not common:
+        return None
+    return sorted(k for k in common if abs(va[k] - vb[k]) > tol)
+
+
+def scan_until_stable(crate, nodes, prev, sync_s, args, label=""):
+    """Keep taking fresh scans until the rails hold still. Returns
+    (samples, how, scans, seconds) with how in reached/steady/timeout.
+
+    One fresh TPDO3 set is NOT a settled measurement. The rails have their own
+    rise and fall times, and the ELMB works through its 64 analog inputs at its
+    own pace, so the first set to arrive after a switch can hold values sampled
+    before it -- even a mix, some channels from before the switch and some from
+    after. Reading it straight away is how a healthy module gets reported as
+    "fails to turn on" while the repeat scans a few seconds later read 12 V.
+
+    The rule is that no voltage channel may have moved more than
+    --settle-tol over a whole --settle-window. Two scans in a row are not
+    enough: back-to-back reads can both be stale and agree with each other,
+    which is why the comparison is against a scan a full window old rather than
+    against the previous one. The window has to outlast the ELMB's sweep, or
+    "nothing moved" only means "the channels the ADC happened to revisit did
+    not move" -- the rest are bit-identical because they were never
+    re-converted, not because they are steady.
+
+    Failing that, it gives up at --settle-timeout and says which rails were
+    still moving, instead of handing back an unsettled scan as though it were a
+    measurement."""
+    t0 = time.monotonic()
+    history = []                       # (when, samples), oldest first
+    last = prev
+    while True:
+        samples = measure(crate, nodes, last, sync_s, args.source, label,
+                          quiet=True)
+        now = time.monotonic()
+        last = samples
+        older = [s for when, s in history if now - when >= args.settle_window]
+        moving = moving_rails(older[-1], samples, args.settle_tol) if older else None
+        if moving == []:
+            return samples, "steady", len(history) + 1, now - t0, []
+        history.append((now, samples))
+        if now - t0 >= args.settle_timeout:
+            # Which rails are still moving is a per-channel fact: one module
+            # bleeding down slowly must not make every other module's verdict
+            # unjudgeable.
+            ref = older[-1] if older else (history[0][1] if history else None)
+            still = moving_rails(ref, samples, args.settle_tol) if ref else None
+            return (samples, "timeout", len(history), now - t0,
+                    still if still is not None else sorted(rail_volts(samples)))
+
+
+def duplicate_fraction(series):
+    """How much of a repeat set is the same ADC sample counted twice. TPDO3 is
+    a cache: read it faster than the ELMB refreshes a channel and consecutive
+    reads come back bit-identical, which would make the variance a fiction."""
+    pairs = same = 0
+    for a, b in zip(series, series[1:]):
+        for x, y in zip(a, b):
+            if x.ok and y.ok:
+                pairs += 1
+                same += (x.uv == y.uv)
+    return (same / pairs) if pairs else 0.0
+
+
 def branch_view(samples, branch):
     """The four samples belonging to one branch, keyed canv/adv/cani/adi."""
     return {k: samples[c] for k, c in branch_channels(branch).items()}
@@ -189,14 +327,17 @@ def classify_current(sample, tol):
 
 
 def classify_voltage(sample, on_min, off_max):
+    """down / partial / up. Only "down" counts as switched off: a rail sitting
+    at some intermediate voltage has switched ON, it is just not healthy, and
+    that is judged separately (abnormal output, see analyse())."""
     if not sample.ok:
         return "unreadable"
     v = to_volts(sample.uv)
-    if v >= on_min:
-        return "up"
     if v <= off_max:
         return "down"
-    return "partial"           # neither clearly a rail nor clearly nothing
+    if v >= on_min:
+        return "up"
+    return "partial"           # on, but not a healthy rail
 
 
 # ------------------------------------------------------------- printing
@@ -239,6 +380,39 @@ def print_stats(stats, args, only=None):
 
 
 # ------------------------------------------------------------- analysis
+# Every fault ends up in one of these buckets, and the default report prints
+# nothing but the bucket names -- which is the whole point: "module 3 is bad
+# and here is the one-line reason". The detail behind each lives in -v.
+FAULT_TEXT = {
+    "command":     "the crate never took the command",
+    "onoff_on":    "fails to turn on",
+    "onoff_off":   "fails to turn off",
+    "onoff_other": "on/off test inconclusive",
+    "sensor":      "current sensor does not work",
+    "current":     "unexpected current",
+    "unsettled":   "on/off not judged, the rail was still moving",
+    "voltage":     "abnormal output voltage",
+    "unstable":    "unsteady reading",
+    "unreadable":  "channel not readable",
+    "other":       "module not fully accounted for",
+}
+LABEL = dict((k, l) for k, l, _ in QUANTITIES)
+QORDER = dict((k, i) for i, (k, _, _) in enumerate(QUANTITIES))
+
+
+def _chan_sort(item):
+    """(branch, key) in reading order -- CAN V, CAN I, AD V, AD I -- rather
+    than in the alphabetical order of the dict keys."""
+    (b, key) = item[0] if isinstance(item[0], tuple) else item
+    return (b, QORDER[key])
+
+
+def _volts(v):
+    """A voltage for the report, with -0.00 normalised away so two readings
+    of the same nothing print as the same string."""
+    return f"{0.0 if abs(v) < 5e-3 else v:.2f} V"
+
+
 def reduce_samples(series, args):
     """series: list of measurements (each a list of 64 AiSample).
     Returns stats[branch][key] = dict(mean, variance, stdev, min, max, ptp, n)
@@ -301,7 +475,7 @@ def analyse(data, stats, args):
                            if v in ("undriven", "implausible")}) if cur else []
         undriven = [x for x in undriven if x not in alive]
         rails_up = sorted({(b, k) for (b, k, st), v in volt.items()
-                           if st == "on" and v == "up"})
+                           if st == "on" and v in ("up", "partial")})
 
         if not alive and not rails_up:
             verdict, detail = "ABSENT", "no module (nothing drives its sense lines)"
@@ -332,6 +506,10 @@ def analyse(data, stats, args):
     populated = [s for s in range(8) if slots[s]["verdict"] != "ABSENT"]
 
     # --- switching, per branch of a populated slot ------------------------
+    # "Off" is only the rail near zero; any voltage above that is the branch
+    # having switched on, healthy or not. A rail that comes up at 6 V passes
+    # here and is caught by the abnormal-output test instead, so the two
+    # failures stay distinguishable in the report.
     switching = {}
     if off is not None and on is not None:
         for s in populated:
@@ -341,27 +519,61 @@ def analyse(data, stats, args):
                 for key in ("canv", "adv"):
                     down = classify_voltage(vo[key], args.v_on_min, args.v_off_max)
                     up = classify_voltage(vn[key], args.v_on_min, args.v_off_max)
-                    if down == "down" and up == "up":
-                        r = "OK"
-                    elif down != "down" and up == "up":
-                        r = "STUCK ON (did not drop when switched off)"
-                    elif down == "down" and up != "up":
-                        r = "NO OUTPUT (did not come up when switched on)"
+                    if "unreadable" in (down, up):
+                        r, cat = f"UNCLEAR (off={down}, on={up})", "onoff_other"
+                    elif down == "down" and up != "down":
+                        r, cat = "OK", None
+                    elif down != "down" and up != "down":
+                        r, cat = "STUCK ON (did not drop when switched off)", "onoff_off"
+                    elif down == "down" and up == "down":
+                        r, cat = "NO OUTPUT (did not come up when switched on)", "onoff_on"
                     else:
-                        r = f"UNCLEAR (off={down}, on={up})"
-                    rows[key] = {"result": r,
+                        r, cat = ("INVERTED (up when commanded off, down when "
+                                  "commanded on -- wrong polarity?)", "onoff_other")
+                    rows[key] = {"result": r, "category": cat,
                                  "off_v": to_volts(vo[key].uv) if vo[key].ok else None,
                                  "on_v": to_volts(vn[key].uv) if vn[key].ok else None}
                 switching[b] = rows
+
+    # --- did the measurements settle? -------------------------------------
+    # A scan taken while the rails were still moving is not evidence. Two
+    # things can show that after the fact: the settle wait gave up while values
+    # were still changing, or the on-state scan and the repeat scans disagree
+    # about whether a rail is up at all -- the same rail, minutes apart, cannot
+    # be both. Either way the honest answer is "not judged", not two
+    # contradictory faults against one module.
+    moving = {ph: {tuple(x) for x in data.get("moving", {}).get(ph, [])}
+              for ph in ("off", "on")}
+    for b, rows in switching.items():
+        for key in ("canv", "adv"):
+            r, st = rows[key], stats[b][key]
+            why = None
+            if r["category"] == "onoff_off" and (b, key) in moving["off"]:
+                why = (f"the off-state scan read {r['off_v']:.2f} V but this "
+                       "rail never stopped changing, so it may simply have "
+                       "been on its way down")
+            elif r["category"] == "onoff_on" and (b, key) in moving["on"]:
+                why = (f"the on-state scan read {r['on_v']:.2f} V but this "
+                       "rail never stopped changing, so it may simply not "
+                       "have been up yet")
+            if (st is not None and r["on_v"] is not None
+                    and (r["on_v"] <= args.v_off_max)
+                    != (st["mean"] <= args.v_off_max)):
+                why = (f"the on-state scan read {r['on_v']:.2f} V and the "
+                       f"repeat scans {st['mean']:.2f} V -- one rail cannot be "
+                       "both")
+            if why:
+                r["result"] = f"NOT SETTLED ({why})"
+                r["category"] = "unsettled"
 
     # --- sensor health, then stability ------------------------------------
     # Order matters. A sense line that nothing drives sits rock steady at a
     # few hundred mV, so it sails through any stdev test -- "steady" is not
     # "working". Plausibility is checked first, and only a channel that is
     # reporting something real gets judged on how steadily it reports it.
-    # Entries are (verdict, why, is_its_own_fault). The last flag keeps a rail
-    # the switching section already condemned from being counted a second time
-    # as a sensor fault -- it is one defect seen from two angles.
+    # Entries are (verdict, why, is_its_own_fault, category). The third flag
+    # keeps a rail the switching section already condemned from being counted
+    # a second time -- it is one defect seen from two angles.
     commanded = data.get("word_repeats", 0xFFFF if on_value else 0x0000)
     stability = {}
     for s in populated:
@@ -370,60 +582,270 @@ def analyse(data, stats, args):
             for key, lbl, unit in QUANTITIES:
                 st = stats[b][key]
                 if st is None:
-                    stability[(b, key)] = ("FAIL", "never readable", True)
+                    stability[(b, key)] = ("FAIL", "never readable", True,
+                                           "unreadable")
                     continue
                 if st["dropped"]:
                     stability[(b, key)] = (
                         "FAIL", f"{st['dropped']} of {len(data['repeats'])} reads "
-                        "came back bad", True)
+                        "came back bad", True, "unreadable")
                     continue
                 if unit == "A" and abs(st["adc_mean"] - 2.5) > args.i_zero_tol:
                     adc = st["adc_mean"]
                     if adc < LEM_MIN_V or adc > LEM_MAX_V:
-                        how = ("outside the transducer's own "
-                               f"{LEM_MIN_V:.3f}-{LEM_MAX_V:.3f} V range, so "
-                               "nothing is driving it")
-                    else:
-                        how = ("below the zero" if adc < 2.5
-                               else "above the zero reference")
+                        # Physically impossible for the transducer to produce,
+                        # so it is not a current at all -- the line is floating.
+                        stability[(b, key)] = (
+                            "FAIL",
+                            f"sense line reads {adc:.3f} V at the ADC pin, not "
+                            "the transducer's 2.5 V zero, and outside its own "
+                            f"{LEM_MIN_V:.3f}-{LEM_MAX_V:.3f} V range -- "
+                            f"nothing is driving it ({st['mean']:.3f} A is what "
+                            "that converts to, not a real current)",
+                            True, "sensor")
+                        continue
+                    # In range: the transducer IS reporting this. It is a fault
+                    # only because nothing should be drawing current on an
+                    # unloaded crate -- with a load connected it is the load.
                     stability[(b, key)] = (
-                        "FAIL", f"sense line reads {adc:.3f} V at the ADC pin, "
-                        f"not the transducer's 2.5 V zero -- {how} "
-                        f"({st['mean']:.3f} A is what that converts to, not a "
-                        "real current)", True)
+                        "FAIL", f"{st['mean']:.3f} A flowing "
+                        f"(sense line at {adc:.3f} V, p-p {st['ptp']:.3f} A) -- "
+                        "a real current if something is connected to this "
+                        "branch, a biased sensor if not", True, "current")
                     continue
-                if unit == "V" and branch_on and st["mean"] < args.v_on_min:
+                if unit == "V" and branch_on and st["mean"] <= args.v_off_max:
                     already = switching.get(b, {}).get(key, {}).get("result", "OK")
                     stability[(b, key)] = (
                         "FAIL", f"branch is commanded ON but the rail reads "
                         f"{st['mean']:.3f} V"
                         + ("" if already == "OK" else " -- same defect as the "
-                           "switching section reports"), already == "OK")
+                           "switching section reports"), already == "OK",
+                        "onoff_on")
+                    continue
+                if (unit == "V" and branch_on
+                        and abs(st["mean"] - args.v_nominal) > args.v_tol):
+                    moving = " and still moving" if st["ptp"] > 0.5 else ""
+                    stability[(b, key)] = (
+                        "FAIL", f"rail reads {st['mean']:.3f} V, outside "
+                        f"{args.v_nominal} +/- {args.v_tol} V (p-p "
+                        f"{st['ptp']:.3f} V over {st['n']} samples{moving})",
+                        True, "voltage")
                     continue
                 limit = args.v_stdev_max if unit == "V" else args.i_stdev_max
                 if st["n"] < 2:
-                    stability[(b, key)] = ("SKIP", "needs at least 2 samples", False)
+                    stability[(b, key)] = ("SKIP", "needs at least 2 samples",
+                                           False, "")
                 elif st["stdev"] > limit:
                     stability[(b, key)] = (
                         "FAIL", f"stdev {st['stdev']:.3f}{unit} > {limit}{unit} "
                         f"(var {st['variance']:.4f}, p-p {st['ptp']:.3f}{unit}, "
-                        f"{st['min']:.3f} .. {st['max']:.3f}{unit})", True)
+                        f"{st['min']:.3f} .. {st['max']:.3f}{unit})", True,
+                        "unstable")
                 else:
                     stability[(b, key)] = ("PASS", f"stdev {st['stdev']:.3f}{unit}",
-                                           False)
+                                           False, "")
 
-    return {"slots": slots, "populated": populated,
-            "switching": switching, "stability": stability}
+    res = {"slots": slots, "populated": populated,
+           "switching": switching, "stability": stability,
+           "warnings": settle_warnings(data, args, switching)}
+    res["faults"] = collect_faults(res, data, stats)
+    res["modules"] = summarise_modules(res)
+    return res
 
 
-def report(res, data, stats, args):
+def settle_warnings(data, args, switching):
+    """What the run itself could not measure cleanly, in plain words. These are
+    not module faults -- they are reasons to distrust a verdict.
+
+    Rails that were still moving are only worth a line if that actually cost a
+    verdict. A rail still drifting when the wait ended, but whose on/off answer
+    came out unambiguous anyway, is not something to report."""
+    out = []
+    cost = {k for b, rows in switching.items() for k, r in rows.items()
+            if r["category"] == "unsettled"}
+    for phase in ("off", "on"):
+        still = [x for x in (data.get("moving", {}).get(phase) or [])
+                 if tuple(x) in {(b, k) for b, rows in switching.items()
+                                 for k in rows}]
+        if still and cost:
+            named = ", ".join(f"branch {b} {LABEL[k]}" for b, k in still[:6])
+            out.append(f"{len(still)} rail(s) still moving "
+                       f"{args.settle_timeout:.0f}s after switching "
+                       f"{phase.upper()} ({named}"
+                       f"{', ...' if len(still) > 6 else ''}) -- re-run, or "
+                       "raise --settle-timeout")
+    dup = data.get("duplicate_fraction", 0.0)
+    if dup > 0.5:
+        want = data.get("sample_interval", 0.0) / max(1.0 - dup, 0.01)
+        out.append(f"{dup * 100:.0f}% of consecutive repeat readings were "
+                   "bit-identical, so the repeat scans are largely the same "
+                   "conversions read twice and the variance is understated -- "
+                   f"try --sample-interval {want:.0f}")
+    return out
+
+
+def collect_faults(res, data, stats):
+    """One flat list of findings, each tied to the slot -- i.e. the module --
+    it condemns, or to None for a crate/server-level one."""
+    faults = []
+    for want, got in data["do_checks"]:
+        if want != got:
+            faults.append({
+                "slot": None, "category": "command", "item": "DO word",
+                "branch": None, "label": "",
+                "value": f"read back 0x{got:04X}, wrote 0x{want:04X}",
+                "text": f"DO read-back 0x{got:04X} != 0x{want:04X} -- the "
+                        "command never reached the outputs"})
+    for b, rows in sorted(res["switching"].items()):
+        for key in ("canv", "adv"):
+            r = rows[key]
+            if not r["category"]:
+                continue
+            v = "n/a" if r["on_v"] is None else _volts(r["on_v"])
+            faults.append({
+                "slot": b // 2, "category": r["category"],
+                "item": f"branch {b} {LABEL[key]}", "value": v,
+                "branch": b, "label": LABEL[key].strip(),
+                "text": f"branch {b} {LABEL[key]}: {r['result']}"})
+    for (b, key), (verdict, why, own, cat) in sorted(res["stability"].items(),
+                                                     key=_chan_sort):
+        if verdict != "FAIL" or not own:
+            continue
+        st = stats[b][key]
+        unit = dict((k, u) for k, _, u in QUANTITIES)[key]
+        if st is None:
+            v = "n/a"
+        elif unit == "A":
+            v = f"{st['adc_mean']:.2f} V at the ADC pin"
+        else:
+            v = _volts(st["mean"])
+        faults.append({
+            "slot": b // 2, "category": cat,
+            "item": f"branch {b} {LABEL[key]}", "value": v,
+            "branch": b, "label": LABEL[key].strip(),
+            "text": f"branch {b} {LABEL[key]}: {why}"})
+    # One unreadable channel is one defect: if the stability pass named it,
+    # drop the switching entry, which could only say the same thing again.
+    dead = {f["item"] for f in faults if f["category"] == "unreadable"}
+    faults = [f for f in faults
+              if not (f["category"] == "onoff_other" and f["item"] in dead)]
+    # Slot-level findings only where no channel-level fault already names the
+    # slot, so a partially-seated module is not reported three times over.
+    named = {f["slot"] for f in faults}
+    for s in range(8):
+        if res["slots"][s]["verdict"] == "POPULATED*" and s not in named:
+            faults.append({"slot": s, "category": "other", "item": f"slot {s}",
+                           "value": "", "branch": None, "label": "",
+                           "text": res["slots"][s]["detail"]})
+    return faults
+
+
+def summarise_modules(res):
+    """Per populated slot: OK, or FAIL plus the distinct reasons, in the order
+    they were found. This is what the default report prints."""
+    modules = {}
+    for s in res["populated"]:
+        groups = []
+        for f in res["faults"]:
+            if f["slot"] != s:
+                continue
+            for g in groups:
+                if g["category"] == f["category"]:
+                    break
+            else:
+                g = {"category": f["category"],
+                     "text": FAULT_TEXT.get(f["category"], f["category"]),
+                     "items": [], "values": [], "branches": [], "labels": []}
+                groups.append(g)
+            if f["item"] not in g["items"]:
+                g["items"].append(f["item"])
+                g["values"].append(f["value"])
+                g["branches"].append(f["branch"])
+                g["labels"].append(f["label"])
+        # A rail whose on/off could not be judged is not a verdict either
+        # way: the module is UNKNOWN, not condemned, unless something else
+        # about it really did fail.
+        real = [g for g in groups if g["category"] != "unsettled"]
+        modules[s] = {"slot": s,
+                      "status": "FAIL" if real else "UNKNOWN" if groups else "OK",
+                      "faults": groups,
+                      "summary": "; ".join(fault_line(g) for g in groups) or "OK"}
+    return modules
+
+
+def fault_line(g):
+    """One reason, as the default report prints it. Channels reading the same
+    thing share one value instead of repeating it, and branches that failed on
+    the same channels collapse together -- so a module whose four rails are
+    all dead is one short phrase, not four."""
+    vals = [v for v in g["values"] if v]
+    value = f" = {vals[0]}" if vals and len(set(vals)) == 1 else ""
+    per_branch = {}
+    for b, lbl in zip(g["branches"], g["labels"]):
+        per_branch.setdefault(b, []).append(lbl)
+    if (value and None not in per_branch
+            and len(set(tuple(v) for v in per_branch.values())) == 1):
+        word = "branch" if len(per_branch) == 1 else "branches"
+        where = (f"{word} {', '.join(str(b) for b in per_branch)} "
+                 + "+".join(next(iter(per_branch.values()))))
+    elif value:
+        where = ", ".join(g["items"])
+    else:
+        where = ", ".join(i + (f" = {v}" if v else "")
+                          for i, v in zip(g["items"], g["values"]))
+    return f"{g['text']}: {where}{value}"
+
+
+# --------------------------------------------------------------- reports
+def report(res, data, args):
     """Print the findings and return the number of faults."""
+    print("\nslots (one module = two branches: slot s owns 2s and 2s+1)")
+    for s in range(8):
+        print(f"  [{s}]" + ("  <-- populated" if s in res["populated"] else ""))
+
+    print("\nmodules")
+    for f in res["faults"]:
+        if f["slot"] is None:
+            print(f"  Crate : FAIL ({FAULT_TEXT[f['category']]}: {f['value']})")
+    for s in res["populated"]:
+        m = res["modules"][s]
+        if m["status"] == "OK":
+            print(f"  Module {s}: OK")
+        else:
+            print(f"  Module {s}: {m['status']} ({m['summary']})")
+
+    if data["off"] is None:
+        print("  (on/off was not tested -- --skip-switch-test)")
+    for w in res["warnings"]:
+        print(f"  ! {w}")
+
+    bad = sorted(s for s in res["populated"]
+                 if res["modules"][s]["status"] == "FAIL")
+    unknown = sorted(s for s in res["populated"]
+                     if res["modules"][s]["status"] == "UNKNOWN")
+    n = len(res["populated"])
+    if not n:
+        print("  none detected -- no slot drives its sense lines")
+    head = f"\n{n} module{'' if n == 1 else 's'} present, "
+    tail = "" if args.verbose else "   (-v for the measurements)"
+    parts = []
+    if bad:
+        parts.append(f"{len(bad)} faulty: replace {_mods_str(bad)}")
+    if unknown:
+        parts.append(f"{len(unknown)} not judged ({_mods_str(unknown)}) -- "
+                     "re-run, and see the note above")
+    if not parts:
+        parts.append("none faulty -- but the crate itself failed, above"
+                     if res["faults"] else "all OK.")
+    print(head + "; ".join(parts) + tail)
+    return len(bad), len(unknown)
+
+
+def report_verbose(res, data, stats, args):
+    """Everything the run measured, printed before the summary."""
     slots, populated = res["slots"], res["populated"]
-    faults = []          # (slot, text)
 
     print("\n=== SLOT OCCUPANCY ===")
-    print("  a module spans TWO branches: slot s owns branches 2s and 2s+1,")
-    print("  so a fault on either branch is a fault of that one module.\n")
     print(f"  {'slot':>4} {'branches':>9} {'module':>11} "
           f"{'sensors':>8} {'rails on':>9}  note")
     for s in range(8):
@@ -438,34 +860,32 @@ def report(res, data, stats, args):
     if data["off"] is None:
         print("  skipped (--skip-switch-test)")
     else:
+        for phase, how in sorted(data.get("settle", {}).items()):
+            print(f"  after switching {phase.upper():3}: rails "
+                  f"{SETTLE_WORD[how]}")
         for want, got in data["do_checks"]:
             ok = "OK" if want == got else "*** MISMATCH ***"
             print(f"  DO word: wrote 0x{want:04X}, read back 0x{got:04X}   {ok}")
-            if want != got:
-                faults.append((None, f"DO read-back 0x{got:04X} != 0x{want:04X} -- "
-                                     "the command never reached the outputs"))
-        print("\n  physical response, populated slots only "
-              "(an empty slot reads ~0 V in both states and proves nothing):")
+        print(f"\n  physical response, populated slots only. <= {args.v_off_max} V "
+              "is off; anything above it")
+        print("  has switched on, healthy or not (an abnormal level is a "
+              "separate finding below):")
         for b in sorted(res["switching"]):
-            for key, lbl, _ in QUANTITIES:
-                if key not in ("canv", "adv"):
-                    continue
+            for key in ("canv", "adv"):
                 r = res["switching"][b][key]
                 off_v = "n/a" if r["off_v"] is None else f"{r['off_v']:7.3f}V"
                 on_v = "n/a" if r["on_v"] is None else f"{r['on_v']:7.3f}V"
                 mark = "" if r["result"] == "OK" else "   <<<"
-                print(f"    branch {b:>2} {lbl:>5}:  off {off_v}   on {on_v}   "
-                      f"{r['result']}{mark}")
-                if r["result"] != "OK":
-                    faults.append((b // 2, f"branch {b} {lbl}: {r['result']}"))
+                print(f"    branch {b:>2} {LABEL[key]:>5}:  off {off_v}   "
+                      f"on {on_v}   {r['result']}{mark}")
 
     print(f"\n=== SENSORS ({len(data['repeats'])} samples) ===")
     print("  a channel passes only if it reports something plausible AND does "
           "so steadily:")
     print(f"    plausible  current input within {args.i_zero_tol} V of its 2.5 V "
           "zero at the ADC pin;")
-    print(f"               voltage input >= {args.v_on_min} V when its branch is "
-          "commanded on")
+    print(f"               voltage input {args.v_nominal} +/- {args.v_tol} V when "
+          "its branch is commanded on")
     print(f"    steady     stdev <= {args.v_stdev_max} V / {args.i_stdev_max} A. "
           "variance = stdev^2 and is in the JSON.\n")
     print_stats(stats, args, only=set(
@@ -474,85 +894,38 @@ def report(res, data, stats, args):
     nfail = sum(1 for v in res["stability"].values() if v[0] == "FAIL")
     print(f"\n  {npass} pass, {nfail} fail, of "
           f"{len(res['stability'])} channels on populated slots")
-    for (b, key), (verdict, why, own) in sorted(res["stability"].items()):
+    for (b, key), (verdict, why, own, cat) in sorted(res["stability"].items(),
+                                                     key=_chan_sort):
         if verdict != "PASS":
-            lbl = dict((k, l) for k, l, _ in QUANTITIES)[key]
-            print(f"    {verdict}  branch {b:>2} {lbl:>5}: {why}")
-            if verdict == "FAIL" and own:
-                faults.append((b // 2, f"branch {b} {lbl}: {why}"))
+            print(f"    {verdict}  branch {b:>2} {LABEL[key]:>5}: {why}")
 
-    # Slot-level findings only where no channel-level fault already names the
-    # slot, so a partially-seated module is not reported three times over.
-    named = {s for s, _ in faults}
-    for s in range(8):
-        if slots[s]["verdict"] == "POPULATED*" and s not in named:
-            faults.append((s, slots[s]["detail"]))
-
-    print("\n=== VERDICT ===")
-    absent = [s for s in range(8) if slots[s]["verdict"] == "ABSENT"]
-    print(f"  modules present : {_slots_str(populated)}"
-          f"{'' if not populated else '  (branches ' + _branches_str(populated) + ')'}")
-    print(f"  modules absent  : {_slots_str(absent)}")
-    if data["off"] is not None:
-        cmd_ok = all(w == g for w, g in data["do_checks"])
-        rails = [(b, k) for b, rows in res["switching"].items()
-                 for k, r in rows.items() if r["result"] != "OK"]
-        n_rails = sum(len(rows) for rows in res["switching"].values())
-        lbls = dict((k, l) for k, l, _ in QUANTITIES)
-        if cmd_ok:
-            print("  command path    : PASS  (0x0000 and 0xFFFF both read back "
-                  "from the DO latches)")
-        else:
-            print("  command path    : FAIL  (the DO latches did not take what "
-                  "was written -- see above)")
-        if not rails:
-            print(f"  rails respond   : PASS  (all {n_rails} rails of every "
-                  "populated slot went off and back on)")
-        else:
-            named = ", ".join(f"branch {b} {lbls[k]}" for b, k in sorted(rails))
-            print(f"  rails respond   : FAIL on {len(rails)} of {n_rails} "
-                  f"({named})")
-            if cmd_ok:
-                print("                    the command reached the latches, so "
-                      "this is the rail, not the switch.")
-    print(f"  sensor channels : {npass} pass / {nfail} fail")
-
-    suspect = sorted({s for s, _ in faults if s is not None})
-    if not faults:
-        print("\n  no faults found.")
+    print("\n=== FAULTS ===")
+    if not res["faults"]:
+        print("  none.")
     else:
-        print(f"\n  FAULTS ({len(faults)}):")
-        for s, text in faults:
-            where = "crate/server" if s is None else \
-                f"slot {s} (module = branches {2 * s} and {2 * s + 1})"
-            print(f"    - {where}: {text}")
-        print(f"\n  SUSPECT MODULES: {_slots_str(suspect)} -- these are the "
-              "modules to pull,")
-        print("  not the individual branches. Both branches of a listed slot "
-              "belong to one module.")
-        _print_interpretation(res, suspect)
-    return len(faults)
+        for f in res["faults"]:
+            where = "crate/server" if f["slot"] is None else \
+                f"slot {f['slot']} (branches {2 * f['slot']} and {2 * f['slot'] + 1})"
+            print(f"  - {where}: {f['text']}")
+        _print_interpretation(res)
 
 
-def _slots_str(slots):
-    return ", ".join(f"slot {s}" for s in slots) if slots else "none"
+def _mods_str(slots):
+    return ", ".join(f"module {s}" for s in slots) if slots else "none"
 
 
-def _branches_str(slots):
-    return ", ".join(f"{2 * s}-{2 * s + 1}" for s in slots)
-
-
-def _print_interpretation(res, suspect):
+def _print_interpretation(res):
     """What a fault here means. The current transducer (LEM HX 05-P/SP2) is
     mounted in the module and the voltage divider is on the module too, so
     nothing the crate does can produce or fix a bad reading -- see
     docs/REFERENCE.md s4."""
+    suspect = sorted({f["slot"] for f in res["faults"] if f["slot"] is not None})
     sense_faults = [s for s in suspect if res["slots"][s]["undriven"]]
-    print("\n  What this means (the sense electronics -- the 100:1 divider and "
-          "the")
-    print("  LEM HX 05-P/SP2 current transducer -- are inside the MODULE, so a "
-          "fault")
-    print("  named above is a module fault, not a crate one):")
+    print("\n  The sense electronics -- the 100:1 divider and the LEM "
+          "HX 05-P/SP2 current")
+    print("  transducer -- are inside the MODULE, so a fault named above is a "
+          "module fault,")
+    print("  not a crate one.")
     if sense_faults:
         plural = "s" if len(sense_faults) > 1 else ""
         print(f"    Slot{plural} {', '.join(str(s) for s in sense_faults)} "
@@ -565,7 +938,7 @@ def _print_interpretation(res, suspect):
         print("      1. reseat the module once, to rule out a partly-made "
               "connector, and re-run.")
         print("      2. if it persists, replace the module.")
-    else:
+    elif suspect:
         print("    No undriven sense lines: every module that is present is "
               "reporting.")
         print("    Faults listed above are rail/output or stability problems in "
@@ -596,8 +969,13 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("-n", "--samples", type=int, default=5,
                    help="repeat measurements for the mean/variance stage (default 5)")
-    p.add_argument("--settle", type=float, default=2.0,
-                   help="seconds to wait after a switch before reading back (default 2)")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="print every channel table, the per-branch switching "
+                        "detail and the statistics (default: slot map and one "
+                        "line per module)")
+    p.add_argument("--settle", type=float, default=1.0,
+                   help="seconds to wait after a switch before the read-back "
+                        "(default 1)")
     p.add_argument("--skip-switch-test", action="store_true",
                    help="read-only: no branch is switched (steps 2 and 3 skipped)")
     p.add_argument("--restore-as-found", action="store_true",
@@ -608,13 +986,38 @@ def main():
     p.add_argument("--invert", action="store_true",
                    help="old (pre-2.0.0) PSU: output level 0 means ON")
     p.add_argument("--json", metavar="PATH",
-                   help="write every raw sample and all statistics here")
+                   help="write the per-channel statistics and findings here")
+
+    g = p.add_argument_group("settling")
+    g.add_argument("--settle-window", type=float, default=ELMB_SWEEP_S,
+                   help="a switched rail counts as settled once no voltage "
+                        "channel has moved for this long (default "
+                        "%(default)s s = one ELMB sweep; shorter and a stale "
+                        "reading looks settled)")
+    g.add_argument("--settle-tol", type=float, default=0.2,
+                   help="volts of movement still counted as holding still "
+                        "(default %(default)s)")
+    g.add_argument("--settle-timeout", type=float, default=4 * ELMB_SWEEP_S,
+                   help="give up waiting for the rails after this and mark "
+                        "those on/off verdicts unjudged (default %(default)s s)")
+    g.add_argument("--sample-interval", type=float, default=ELMB_SWEEP_S,
+                   help="seconds between the repeat scans (default "
+                        "%(default)s s = one ELMB sweep). Any closer and they "
+                        "are the same conversions read twice, and the variance "
+                        "means nothing.")
 
     g = p.add_argument_group("pass/fail thresholds")
-    g.add_argument("--v-on-min", type=float, default=10.0,
-                   help="rail volts at or above this count as ON (default 10.0)")
+    g.add_argument("--v-nominal", type=float, default=12.0,
+                   help="expected rail voltage (default 12.0)")
+    g.add_argument("--v-tol", type=float, default=2.0,
+                   help="a commanded-on rail further than this from --v-nominal "
+                        "is an abnormal output (default 2.0 V)")
+    g.add_argument("--v-on-min", type=float, default=None,
+                   help="rail volts at or above this are a healthy rail "
+                        "(default: --v-nominal minus --v-tol)")
     g.add_argument("--v-off-max", type=float, default=1.0,
-                   help="rail volts at or below this count as OFF (default 1.0)")
+                   help="rail volts at or below this count as OFF; anything "
+                        "above it has switched on, healthy or not (default 1.0)")
     g.add_argument("--i-zero-tol", type=float, default=0.25,
                    help="volts at the ADC pin either side of the sensor's 2.5 V "
                         "zero still counted as 'sensor alive' (default 0.25, "
@@ -644,14 +1047,39 @@ def main():
                         "(default: nodeGuardIntervalMs + syncIntervalMs + 10s)")
     g.add_argument("--sync-interval-ms", type=float, default=None,
                    help="override the Bus/@syncIntervalMs read from the config")
+    g.add_argument("--fast-sync", type=int, default=1000, metavar="MS",
+                   help="run our own server off a copy of the config with "
+                        "Bus/@syncIntervalMs set to this, since every scan "
+                        "costs one SYNC period (default 1000; 0 = use the "
+                        "config as it is). Ignored with --use-running-server.")
     args = p.parse_args()
 
+    if args.v_on_min is None:
+        args.v_on_min = args.v_nominal - args.v_tol
+
+    if args.samples < 1:
+        # Zero repeats leaves every channel with no statistics at all, which
+        # the sensor checks would read as "never readable" and condemn.
+        args.samples = 1
     if args.samples < 2:
         print("warning: --samples < 2, so there is nothing to take a variance of")
 
-    server = OpcUaServer(config_file=args.config_file,
-                         opcua_backend_config=args.opcua_backend_config,
-                         use_sudo=not args.no_sudo)
+    def new_server(config_file):
+        return OpcUaServer(config_file=config_file,
+                           opcua_backend_config=args.opcua_backend_config,
+                           use_sudo=not args.no_sudo)
+
+    server = new_server(args.config_file)
+    # Every scan costs one SYNC period -- TPDO3 only refreshes then -- and the
+    # shipped config syncs every 10 s, so the wait dominates the whole run.
+    # When we own the server we start it from a copy of the config with a
+    # shorter SYNC; that is the only real lever on how long this takes.
+    tmp_config = None
+    if args.fast_sync and not args.use_running_server:
+        tmp_config = faster_sync_config(server.config_file, args.fast_sync)
+        if tmp_config:
+            server = new_server(tmp_config)
+
     sync_s = (args.sync_interval_ms / 1000.0 if args.sync_interval_ms is not None
               else bus_interval_s(server.config_file, "syncIntervalMs"))
     nodeguard_s = bus_interval_s(server.config_file, "nodeGuardIntervalMs")
@@ -663,35 +1091,46 @@ def main():
         args.warmup = max(30.0, nodeguard_s + sync_s + 10.0)
 
     n_scans = args.samples + (1 if args.skip_switch_test else 3)
-    est = (n_scans * (sync_s + 1.5) + nodeguard_s
-           + (0 if args.skip_switch_test else 2 * args.settle))
-    print(f"plan: {n_scans} analog scans of all 64 channels, "
-          f"~{est:.0f}s plus server start-up")
-    print(f"      TPDO3 refreshes once per SYNC and Bus/@syncIntervalMs is "
-          f"{sync_s * 1000:.0f} ms, so each")
-    print("      scan costs at least that much wall time.")
-    if sync_s >= 5.0:
-        print(f"      tip: set syncIntervalMs to 1000 in "
-              f"{Path(server.config_file).name} and restart the server")
-        print("           to run this roughly ten times faster.")
-    if not args.skip_switch_test:
-        print("      NOTE: every branch will be switched OFF and back ON. "
-              "Anything powered")
-        print("            from this crate is power-cycled. "
-              "--skip-switch-test avoids that.")
+    # The repeat scans cost one ELMB sweep each -- that is the floor, not a
+    # setting -- and each switch costs a settle window on top.
+    est = (nodeguard_s + sync_s + args.samples * args.sample_interval
+           + (0 if args.skip_switch_test
+              else 2 * (args.settle + args.settle_window + 2 * sync_s)))
+    print(f"crate scan: {n_scans}+ scans of all 64 channels at one SYNC "
+          f"({sync_s * 1000:.0f} ms) each, ~{est:.0f}s plus however long the "
+          "rails take to settle"
+          + ("" if args.skip_switch_test
+             else "\n            every branch is switched OFF and back ON"))
+    if args.verbose:
+        if tmp_config:
+            print(f"            SYNC lowered to {args.fast_sync} ms for this run "
+                  f"({Path(tmp_config).name})")
+        elif sync_s >= 5.0:
+            print(f"            tip: syncIntervalMs is {sync_s * 1000:.0f} ms in "
+                  f"{Path(server.config_file).name}; 1000 runs this ten times "
+                  "faster")
 
     with contextlib.ExitStack() as stack:
+        if tmp_config:
+            stack.callback(lambda: os.path.exists(tmp_config)
+                           and os.unlink(tmp_config))
         if args.use_running_server:
             if not server.is_running():
                 sys.exit("error: --use-running-server but no CanOpenOpcUa is "
                          f"running for {server.config_file}")
-            print(f"\n[0/4] attaching to the running server, pid {server.pid()}")
+            print(f"  attached to the running server, pid {server.pid()}")
         else:
+            running = new_server(args.config_file).pid() or \
+                stale_scan_pid(server.binary)
+            if running:
+                sys.exit(f"error: a CanOpenOpcUa is already running for this "
+                         f"crate (pid {running}).\n       Attach to it with "
+                         "--use-running-server, or stop it first -- two "
+                         "CANopen\n       masters on one bus collide.")
             stack.enter_context(server)
-            print(f"\n[0/4] server started, pid {server.pid()}")
             if not server.wait_ready(timeout=args.start_timeout):
                 sys.exit("error: OPC-UA endpoint never opened -- check server.log")
-            print("      endpoint open")
+            print(f"  server started, pid {server.pid()}")
 
         client = Client(url=args.endpoint)
         client.connect()
@@ -703,123 +1142,185 @@ def main():
         crate = PsuCrate(client, ns, args.bus, args.node)
         nodes = crate.ai_nodes(args.source)
 
-        # The endpoint being open is not the crate answering. Every node reads
-        # BadWaitingForInitialData until the server has fetched it from the
-        # ELMB once, and stateAsText waits on a node-guard cycle.
-        print(f"      waiting up to {args.warmup:.0f}s for the crate to answer "
-              f"(node guard runs every {nodeguard_s:.0f}s) ...")
-        ok, state = crate.wait_ready(timeout=args.warmup)
+        # The endpoint being open is not the crate answering, and the crate
+        # answering is not the crate being ready. A crate that has just been
+        # power-cycled boots into PRE-OPERATIONAL and the server only drives
+        # it to Node/@requestedState on a node-management cycle, so the first
+        # readable state is usually the wrong one. Waiting for the state we
+        # actually need is what makes the first run after a power cycle work
+        # rather than exit and ask to be re-run.
+        want = "OPERATIONAL" if args.method == "rpdo" else None
+        print(f"  waiting up to {args.warmup:.0f}s for the crate"
+              f"{' to reach OPERATIONAL' if want else ' to answer'} "
+              f"(node guard every {nodeguard_s:.0f}s) ...")
+        ok, state = crate.wait_ready(timeout=args.warmup, require=want)
         if not ok:
+            answered, now = crate.ping()
+            if answered:
+                sys.exit(f"error: node is {now} after {args.warmup:.0f}s, not "
+                         "OPERATIONAL, and RPDO writes are only acted on in "
+                         "OPERATIONAL.\n       The server drives the node to "
+                         "Node/@requestedState -- check that it says "
+                         "OPERATIONAL in\n       the config, raise --warmup, or "
+                         "use --method sdo, which works in PRE-OPERATIONAL.")
             sys.exit(f"error: the crate never answered: {state}\n"
                      "       check --bus/--node against config-elmbpsu.xml, and "
                      "server.log for the node table")
-        print(f"      NMT state {state}, DO word 0x{crate.do_word():04X}")
-        if args.method == "rpdo" and state != "OPERATIONAL":
-            sys.exit(f"error: node is {state}; RPDO writes are only acted on in "
-                     "OPERATIONAL. Fix requestedState, or use --method sdo.")
+        print(f"  crate {state}, DO word 0x{crate.do_word():04X}")
 
         data = {"do_checks": [], "off": None, "on": None}
 
-        print("\n[1/4] measuring as found ...")
+        print("\n  [1/4] measuring as found ...")
         data["word_as_found"] = crate.do_word()
         # First scan gets a longer budget: the TPDO3 cache is empty until the
         # server's first SYNC, which can be a whole syncIntervalMs away.
         data["baseline"] = measure(crate, nodes, None, sync_s, args.source,
-                                   "baseline", timeout=max(args.warmup,
-                                                           sync_s + 5.0))
-        print_measurement(data["baseline"], "as found", args)
+                                   "baseline", quiet=not args.verbose,
+                                   timeout=max(args.warmup, sync_s + 5.0))
+        if args.verbose:
+            print_measurement(data["baseline"], "as found", args)
 
+
+        data["settle"], data["moving"] = {}, {}
         if not args.skip_switch_test:
-            print("\n[2/4] switching every branch OFF ...")
-            want, got = switch_all(crate, False, args)
-            data["do_checks"].append((want, got))
-            print(f"      wrote 0x{want:04X}, read back 0x{got:04X}"
-                  f"{'' if want == got else '   *** MISMATCH ***'}")
-            data["off"] = measure(crate, nodes, data["baseline"], sync_s,
-                                  args.source, "off-state scan")
-            print_measurement(data["off"], "all branches OFF", args)
-            n_up = sum(1 for b in range(16) for k in ("canv", "adv")
-                       if classify_voltage(branch_view(data["off"], b)[k],
-                                           args.v_on_min, args.v_off_max) == "up")
-            print(f"      rails still up: {n_up}"
-                  + ("  <- these did not switch off" if n_up else "  (all off)"))
+            want_w, got = switch_all(crate, False, args)
+            data["do_checks"].append((want_w, got))
+            data["off"], how, ns, secs, moving = scan_until_stable(
+                crate, nodes, data["baseline"], sync_s, args, label="off-state")
+            data["settle"]["off"], data["moving"]["off"] = how, moving
+            print(f"  [2/4] all branches OFF: wrote 0x{want_w:04X}, read back "
+                  f"0x{got:04X}"
+                  f"{'' if want_w == got else '   *** MISMATCH ***'}"
+                  f" -- rails {SETTLE_WORD[how]} after {secs:.0f}s, {ns} scans")
+            if args.verbose:
+                print_measurement(data["off"], "all branches OFF", args)
+                n_up = sum(1 for b in range(16) for k in ("canv", "adv")
+                           if classify_voltage(branch_view(data["off"], b)[k],
+                                               args.v_on_min,
+                                               args.v_off_max) != "down")
+                print(f"      rails still up: {n_up}"
+                      + ("  <- these did not switch off" if n_up else "  (all off)"))
 
-            print("\n[3/4] switching every branch ON ...")
-            want, got = switch_all(crate, True, args)
-            data["do_checks"].append((want, got))
-            print(f"      wrote 0x{want:04X}, read back 0x{got:04X}"
-                  f"{'' if want == got else '   *** MISMATCH ***'}")
+            want_w, got = switch_all(crate, True, args)
+            data["do_checks"].append((want_w, got))
             data["word_on_state"] = got     # what actually latched, not what we asked
-            data["on"] = measure(crate, nodes, data["off"], sync_s,
-                                 args.source, "on-state scan")
-            print_measurement(data["on"], "all branches ON", args)
-            n_up = sum(1 for b in range(16) for k in ("canv", "adv")
-                       if classify_voltage(branch_view(data["on"], b)[k],
-                                           args.v_on_min, args.v_off_max) == "up")
-            print(f"      rails up: {n_up} of 32 "
-                  "(empty slots can never come up, see the occupancy table)")
+            data["on"], how, ns, secs, moving = scan_until_stable(
+                crate, nodes, data["off"], sync_s, args, label="on-state")
+            data["settle"]["on"], data["moving"]["on"] = how, moving
+            print(f"  [3/4] all branches ON : wrote 0x{want_w:04X}, read back "
+                  f"0x{got:04X}"
+                  f"{'' if want_w == got else '   *** MISMATCH ***'}"
+                  f" -- rails {SETTLE_WORD[how]} after {secs:.0f}s, {ns} scans")
+            if args.verbose:
+                print_measurement(data["on"], "all branches ON", args)
+                n_up = sum(1 for b in range(16) for k in ("canv", "adv")
+                           if classify_voltage(branch_view(data["on"], b)[k],
+                                               args.v_on_min,
+                                               args.v_off_max) != "down")
+                print(f"      rails up: {n_up} of 32 "
+                      "(empty slots can never come up, see the occupancy table)")
         else:
-            print("\n[2/4] [3/4] skipped (--skip-switch-test)")
+            print("  [2/4] [3/4] skipped (--skip-switch-test)")
             data["on"] = data["baseline"]
             data["word_on_state"] = data["word_as_found"]
 
-        print(f"\n[4/4] {args.samples} repeat measurements for mean and variance ...")
+        print(f"  [4/4] {args.samples} repeat scans {args.sample_interval:.0f}s "
+              f"apart for mean and variance, "
+              f"~{args.samples * args.sample_interval:.0f}s ...")
         # Which branches these samples were taken under, so a rail reading 0 V
         # is only called a fault when its branch was actually commanded on.
         data["word_repeats"] = crate.do_word()
         prev = data["on"] if data["on"] is not None else data["baseline"]
         data["repeats"] = []
+        taken = 0.0
         for i in range(args.samples):
+            # Spaced deliberately: a fresh TPDO3 set is not a fresh ADC sample,
+            # and reading the cache faster than the ELMB refreshes it would
+            # give a variance of nearly zero that means nothing.
+            wait = args.sample_interval - (time.monotonic() - taken)
+            if i and wait > 0:
+                time.sleep(wait)
+            taken = time.monotonic()
             m = measure(crate, nodes, prev, sync_s, args.source,
-                        f"sample {i + 1}/{args.samples}")
+                        f"sample {i + 1}/{args.samples}", quiet=not args.verbose)
             data["repeats"].append(m)
             prev = m
+        data["duplicate_fraction"] = duplicate_fraction(data["repeats"])
+        data["sample_interval"] = args.sample_interval
 
         stats = reduce_samples(data["repeats"], args)
         res = analyse(data, stats, args)
-        nfaults = report(res, data, stats, args)
+        if args.verbose:
+            report_verbose(res, data, stats, args)
+        nfail, nunknown = report(res, data, args)
 
         if args.restore_as_found and not args.skip_switch_test:
             crate.write_word(data["word_as_found"])
             time.sleep(args.settle)
-            print(f"\n  restored DO word to 0x{crate.do_word():04X} (as found)")
+            print(f"\ncrate DO word restored to 0x{crate.do_word():04X} (as found)")
         elif not args.skip_switch_test:
-            print(f"\n  crate left with every branch ON "
+            print(f"\ncrate left with every branch ON "
                   f"(DO word 0x{crate.do_word():04X})")
 
         if args.json:
             write_json(args.json, data, stats, res, args, server)
-            print(f"  raw samples and statistics written to {args.json}")
+            print(f"statistics and findings written to {args.json}")
 
-    if not args.use_running_server:
-        print("\ndone -- server stopped")
-    return 1 if nfaults else 0
+    # 0 nothing found, 1 something is faulty, 2 nothing faulty but something
+    # could not be judged -- which is not a pass.
+    return 1 if nfail else (2 if nunknown else 0)
 
 
 def write_json(path, data, stats, res, args, server):
-    def dump_meas(m):
-        return None if m is None else [
-            {"channel": s.channel, "uv": s.uv, "ok": s.ok,
-             "timestamp": None if s.timestamp is None else str(s.timestamp)}
-            for s in m]
+    """Statistics and findings, not raw samples. Every scan of every channel
+    with its SourceTimestamp was most of the file's size and none of its
+    value: the mean and variance are what every verdict is made of, and the
+    single-shot states are kept only as the engineering values the on/off
+    verdicts rest on."""
+    conv = dict((k, to_volts if u == "V" else to_amps) for k, _, u in QUANTITIES)
+
+    def state_values(m):
+        if m is None:
+            return None
+        return {str(b): {k: (None if not s.ok else round(conv[k](s.uv), 4))
+                         for k, s in branch_view(m, b).items()}
+                for b in range(16)}
+
+    def stat_values(st):
+        if st is None:
+            return None
+        return {k: (round(st[k], 6) if isinstance(st[k], float) else st[k])
+                for k in ("n", "dropped", "mean", "variance", "stdev", "adc_mean")}
+
     out = {
         "generated": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "config_file": server.config_file, "endpoint": args.endpoint,
-        "thresholds": {"v_on_min": args.v_on_min, "v_off_max": args.v_off_max,
+        "samples": len(data["repeats"]),
+        "thresholds": {"v_nominal": args.v_nominal, "v_tol": args.v_tol,
+                       "v_on_min": args.v_on_min, "v_off_max": args.v_off_max,
                        "i_zero_tol": args.i_zero_tol,
                        "v_stdev_max": args.v_stdev_max,
                        "i_stdev_max": args.i_stdev_max},
         "do_checks": [{"wrote": w, "read_back": g} for w, g in data["do_checks"]],
+        "settled": data.get("settle", {}),
+        "still_moving": {ph: [f"{b}.{k}" for b, k in v]
+                         for ph, v in data.get("moving", {}).items()},
+        "duplicate_fraction": round(data.get("duplicate_fraction", 0.0), 4),
+        "sample_interval_s": data.get("sample_interval"),
+        "warnings": res["warnings"],
         "word_as_found": data.get("word_as_found"),
         "word_during_repeats": data.get("word_repeats"),
-        "measurements": {k: dump_meas(data.get(k))
-                         for k in ("baseline", "off", "on")},
-        "repeats": [dump_meas(m) for m in data["repeats"]],
         "channel_map": {str(b): branch_channels(b) for b in range(16)},
-        "statistics": {str(b): stats[b] for b in range(16)},
+        "states": {k: state_values(data.get(k))
+                   for k in ("baseline", "off", "on")},
+        "statistics": {str(b): {k: stat_values(stats[b][k])
+                                for k, _, _ in QUANTITIES} for b in range(16)},
         "slots": res["slots"], "populated": res["populated"],
+        "modules": {str(s): m for s, m in res["modules"].items()},
+        "faults": res["faults"],
         "switching": {str(b): v for b, v in res["switching"].items()},
-        "stability": {f"{b}.{k}": {"verdict": v[0], "why": v[1], "own_fault": v[2]}
+        "stability": {f"{b}.{k}": {"verdict": v[0], "why": v[1],
+                                   "own_fault": v[2], "category": v[3]}
                       for (b, k), v in res["stability"].items()},
     }
     with open(path, "w") as fh:

@@ -166,7 +166,7 @@ class PsuCrate:
         except Exception as exc:
             return False, str(exc)
 
-    def wait_ready(self, timeout=30.0, poll=0.5):
+    def wait_ready(self, timeout=30.0, poll=0.5, require=None):
         """Block until the crate is answering, which is later than the server
         endpoint opening. Returns (ok, state_or_error).
 
@@ -175,12 +175,21 @@ class PsuCrate:
         the ELMB -- the address space exists immediately, the data does not.
         stateAsText comes from the node guard, and Bus/@nodeGuardIntervalMs is
         10 s in our config, so "endpoint open" can precede "crate answering"
-        by that much. OpcUaServer.wait_ready() only gets you the former."""
+        by that much. OpcUaServer.wait_ready() only gets you the former.
+
+        require: keep waiting until stateAsText equals this, e.g.
+        "OPERATIONAL". The first answer is not the final one after a crate
+        power cycle: the ELMB boots into PRE-OPERATIONAL and the server drives
+        it to Node/@requestedState from its node-management cycle, so the
+        state can be readable a node-guard period before it is right."""
         deadline = time.monotonic() + timeout
         last = f"still BadWaitingForInitialData after {timeout}s"
         while True:
             try:
-                return True, self.state()
+                state = self.state()
+                if require is None or state == require:
+                    return True, state
+                last = state
             except Exception as exc:
                 last = f"{type(exc).__name__}: {exc}"
                 # A node id that does not exist will never start existing.

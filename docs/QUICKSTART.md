@@ -205,25 +205,51 @@ repeats for a mean and variance per channel.
 
 ```bash
 elmbpsu-cratescan                       # 5 repeats, starts and stops the server
+elmbpsu-cratescan -v                    # every table behind the verdict
 elmbpsu-cratescan -n 20 --json scan.json
 elmbpsu-cratescan --skip-switch-test    # read-only: switches nothing
 elmbpsu-cratescan --use-running-server  # attach to a server already up
 ```
 
-It reports **per slot, not per branch** — a module spans branches `2*slot` and
-`2*slot+1`, so a fault on either condemns that one module:
+By default it prints a slot map and one line per module, nothing else:
+
+```
+  [0]  <-- populated
+  [1]
+  ...
+  Module 0: OK
+  Module 1: FAIL (fails to turn on: branches 2, 3 CAN V+AD V = 0.00 V)
+  Module 2: FAIL (current sensor does not work: branches 4, 5 AD I = 0.31 V at the ADC pin)
+  Module 3: UNKNOWN (on/off could not be judged -- the rails had not settled: ...)
+```
+
+Exit status: **0** nothing found, **1** something is faulty, **2** nothing
+faulty but something could not be judged — which is not a pass.
+
+Findings are **per slot, not per branch** — a module spans branches `2*slot`
+and `2*slot+1`, so a fault on either condemns that one module. It checks:
 
 - which slots hold a module, and which are empty;
-- whether on/off works, split into the command path (DO read-back) and the
-  physical response (the rail actually going down and back up);
-- whether each sensor reads something plausible *and* reads it steadily. Both
-  halves matter: a sense line that nothing drives sits rock steady at a few
-  hundred mV, so a stdev test alone would pass it.
+- on/off, on the command path (DO read-back) and the physical one. At or below
+  `--v-off-max` (1 V) is off; **anything above it has switched on**, healthy or
+  not;
+- the level: a commanded-on rail further than `--v-tol` (2 V) from
+  `--v-nominal` (12 V) is an abnormal output, reported apart from failing to
+  switch;
+- whether each sensor reads something plausible *and* steadily. Both halves
+  matter: a sense line that nothing drives sits rock steady at a few hundred
+  mV, so a stdev test alone would pass it.
 
-Exit status is 0 only if nothing was found. It ends with a `SUSPECT MODULES`
-line: the slots to pull. **A fault it names is a module fault** — the voltage
-divider and the current transducer are both in the module, so the crate is not
-in the signal path.
+**A fault it names is a module fault** — the voltage divider and the current
+transducer are both in the module, so the crate is not in the signal path.
+
+**It waits for the rails to hold still after each switch**, rather than reading
+the next scan. The ELMB sweeps its 64 inputs about once every 11 s, so a scan
+taken straight after a switch holds pre-switch values — that is what makes a
+healthy module look like it failed to switch ([REFERENCE.md](REFERENCE.md) §6).
+Every wait is one sweep or more: `--settle-window` (12 s), `--sample-interval`
+(12 s), `--settle-timeout` (48 s). A rail still moving when the wait ends is
+reported as **unjudged**, per channel, not as a fault.
 
 Presence is decided from the **current** inputs. A voltage input reads ~0
 whether the branch is off or the slot is empty, but the module's transducer
@@ -232,8 +258,17 @@ only when there is no module. That is why the all-off step is a measurement and
 not just a switch test ([REFERENCE.md](REFERENCE.md) §4).
 
 **It power-cycles every branch.** Use `--skip-switch-test` if anything is
-plugged in that should not be. With `syncIntervalMs` at 10000 each of the ~8
-scans costs 10 s; drop it to 1000 for roughly a tenfold speedup.
+plugged in that should not be.
+
+A default run is **~100 s**, and the ELMB's sweep is why: five repeat scans one
+sweep apart is 60 s of it. `-n 3` cuts that to ~35 s if you only want the
+occupancy and switching answers. The scan also runs its own server off a temp
+copy of the config with `syncIntervalMs` at 1000 ms (`--fast-sync 0` leaves it
+alone) — that does not speed up the sweep, but it does mean the waits are timed
+in seconds rather than in 10 s SYNC steps.
+
+`--json` gets the per-channel mean and variance, the three state measurements
+as engineering values, and every finding — not the raw samples.
 
 ---
 
