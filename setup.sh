@@ -137,6 +137,8 @@ venv/
 # --- local runtime output --------------------------------------------------
 *.log
 candump*.txt
+# measurement dumps (elmbpsu-cratescan --json, etc.)
+*.json
 
 # --- editors / OS ----------------------------------------------------------
 .vscode/
