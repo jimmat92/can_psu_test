@@ -6,7 +6,15 @@ Every mapping claim below cites the file it came from.
 
 ## 1. Why your outputs read 0 V
 
-That is the expected state. Branch outputs are **not** enabled by mains power.
+**Answered, 2026-08-25: they don't.** The crate's own ADC reports 11.8-12.8 V on
+both rails of every populated branch, with all 16 control bits set. See
+HANDOFF.md §8b for the full table. The rails float, so a meter referenced to
+chassis reads nothing — measure each positive against **its own return**.
+
+The rest of this section is the original reasoning, which still applies to a
+crate that really is switched off.
+
+Branch outputs are **not** enabled by mains power.
 
 The crate contains one control ELMB whose digital output ports **A** and **C**
 drive the on/off switch of the 16 branches (`ElmbPsuIntroduction.pdf` §2). At
@@ -66,10 +74,10 @@ still true — that is what the script is for.
 Once you have a free port, bring it up at the ELMB PSU default bitrate:
 
 ```bash
-sudo ip link set can8 down
-sudo ip link set can8 type can bitrate 125000
-sudo ip link set can8 up
-ip -details link show can8
+sudo ip link set can13 down
+sudo ip link set can13 type can bitrate 125000
+sudo ip link set can13 up
+ip -details link show can13
 ```
 
 Control-bus CAN pinout on the DE-9 (CiA-303 standard, which the ELMB follows):
@@ -85,27 +93,30 @@ inside the modules only terminate the *branch* buses.
 to install. Use this to answer "is the crate alive and can I switch a branch?"
 before you invest in the OPC-UA stack.
 
-Substitute the interface `can_diag.py` told you was free — `can8` below.
+Substitute the interface `can_diag.py` told you was free — `can13` below.
+
+This crate is **node 57 (0x39)**, not the factory default 63 — confirmed by a
+bus scan on 2026-08-25. Pass `--node 57`; the tool's default is 63.
 
 ```bash
 # 1. Is anything on the bus? (probes node-guard on all 127 node ids)
-./elmbpsu_can.py --iface can8 scan
+./elmbpsu_can.py --iface can13 scan
 
 # 2. Who is node 63?
-./elmbpsu_can.py --iface can8 info
+./elmbpsu_can.py --iface can13 --node 57 info
 
 # 3. Current configuration and branch states
-./elmbpsu_can.py --iface can8 status
+./elmbpsu_can.py --iface can13 --node 57 status
 
 # 4. Switch slot 0 position A (branch 0) on, with automatic read-back verify
-./elmbpsu_can.py --iface can8 on 0
+./elmbpsu_can.py --iface can13 --node 57 on 0
 
 # 5. Measure. Then read what the crate thinks the rails are doing:
-./elmbpsu_can.py --iface can8 mon --branches 0
+./elmbpsu_can.py --iface can13 --node 57 mon --branches 0
 
 # 6. Everything on / everything off
-./elmbpsu_can.py --iface can8 on all
-./elmbpsu_can.py --iface can8 off all
+./elmbpsu_can.py --iface can13 --node 57 on all
+./elmbpsu_can.py --iface can13 --node 57 off all
 ```
 
 Never point this at a bus `can_diag.py` reported as IN USE. Two CANopen
@@ -214,11 +225,31 @@ lab actually runs; `/opt/CanOpenOpcUa/bin/` holds a newer but `-dirty` pipeline
 build of v0.10.2.
 
 ```bash
-nohup /opt/labTempMonitor/bin/CanOpenOpcUa \
+sudo /opt/labTempMonitor/bin/CanOpenOpcUa \
     --config_file  $PWD/config-elmbpsu.xml \
-    --opcua_backend_config $PWD/ServerConfig-elmbpsu.xml \
-    > server.log 2>&1 &
+    --opcua_backend_config $PWD/ServerConfig-elmbpsu.xml
 ```
+
+**It needs privileges, and `DontConfigure` will not save you.** CanModule opens
+a SocketCAN port by running the equivalent of `ip link set <port> down`, setting
+the bitrate, and bringing it up — unconditionally. Verified on both installed
+builds (v0.10.1 and v0.10.2): with `settings="125k"` and no privileges every
+call returns `Operation not permitted`; with `settings="DontConfigure"` it still
+enters that path but with bitrate 0, so the call fails `Invalid argument` and
+**leaves your port DOWN**. The `force_dont_reconfigure` flag logs
+`forcing DontReconfigure mode` and then does nothing — the assignment is
+commented out in `Device/src/DBus.cpp:109`. The lab's own working server
+(`/opt/labTempMonitor/bin/config.xml`) uses `settings="125k"` and runs as root.
+
+To avoid running the whole server as root, give a private copy just
+`CAP_NET_ADMIN`:
+
+```bash
+mkdir -p ~/bin && cp /opt/labTempMonitor/bin/CanOpenOpcUa ~/bin/
+sudo setcap cap_net_admin+ep ~/bin/CanOpenOpcUa
+```
+
+Either way it fails without one of the two.
 
 **Always pass `--opcua_backend_config`.** It defaults to
 `<directory of the binary>/ServerConfig.xml` — for the labTempMonitor build that
@@ -272,9 +303,51 @@ Both scripts were validated end-to-end against simulated devices — `selftest.p
 against a fake CANopen ELMB, and the OPC-UA client against a mock server
 reproducing this exact address space.
 
-## 6. If a branch still shows 0 V after a verified switch-on
+## 6. Finding the rails on the Burndy without a pinout
+
+The pinout is not in this workspace, the PDF, or the fwElmbPSU panels — only the
+phrase "'burndy' connector". It needs EDMS (EDA-04145-V1-0) or the PH-ESS
+hardware page. You do not need it.
+
+**Use the crate as its own signal generator.** Both rails float and are isolated
+from each other and from chassis, so probe **pin to pin**, never pin to chassis.
+Then let the software tell you which pair you found:
+
+```bash
+# 1. Confirm the branch is on and what the crate thinks it is delivering
+./elmbpsu_opcua.py mon --branches 0
+
+# 2. Meter across a candidate pin pair, then switch that branch off
+./elmbpsu_opcua.py off 0
+
+# 3. Anything that drops to 0 V belongs to branch 0. Put it back:
+./elmbpsu_opcua.py on 0
+```
+
+Sweep efficiently: hold one probe on a fixed pin, walk the other across every
+remaining pin, then move the fixed probe on by one. Each branch has four power
+contacts — CAN +12 V and its return, AD +12 V and its return — plus the branch
+CAN bus signals, so you are looking for two independent ~12 V pairs.
+
+Two practical traps: the crate-side Burndy contacts are usually recessed, and a
+standard probe tip may simply not reach them — use a mating connector or a fine
+tip. And check the front-panel CAN/AD LEDs first: they tell you which branches
+are live before you probe anything.
+
+## 6b. If a branch still shows 0 V after a verified switch-on
 
 Work down this list:
+
+0. **Read-back came back `0x0000` when you only asked for one branch.** This is
+   the RPDO cache trap, and it is not a hardware fault. `RPDO1.branchNN` is a
+   quasar `RpdoCachedVariable`: writing it read-modify-writes the **server's**
+   8-byte shadow cache and transmits the whole thing. That cache starts at all
+   zeros and knows nothing about the state the crate powered up in from
+   `doInitHigh`. So the first per-branch write after a server restart transmits
+   zeros and switches every branch off. `elmbpsu_opcua.py` now writes the full
+   16-bit word for `--method rpdo`, so intent and cache cannot diverge. If you
+   hit it with an older copy or another client, the cache and the crate are in
+   sync afterwards — just re-issue the command, and `on all` to restore.
 
 1. **Read-back mismatch reported by the tool.** The ELMB did not latch the
    write. Check `dioOutputMaskC`/`dioOutputMaskA` are `0xFF` (`status`); if not,
@@ -301,9 +374,9 @@ cycle without any software in the loop:
 
 ```bash
 # example: all 16 branches on at power-up, on a production crate
-./elmbpsu_can.py --iface can8 on all
+./elmbpsu_can.py --iface can13 --node 57 on all
 # then persist the ELMB parameters (0x1010:01 <- "save")
-./elmbpsu_can.py --iface can8 outmask 0xFF 0xFF --store
+./elmbpsu_can.py --iface can13 --node 57 outmask 0xFF 0xFF --store
 ```
 
 `doInitHigh` (0x2300) is the object that governs this; read it with `status`

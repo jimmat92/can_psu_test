@@ -488,6 +488,37 @@ Other environment facts:
   symlink to the CanOpenOpcUa binary), running as root since 10 July 2026, and
   serving `opc.tcp://pcaticstest08:33815`. It is a production monitor on this
   bench. Never bring up, reconfigure or transmit on can9.
+- **The server cannot run unprivileged against real SocketCAN hardware.**
+  Verified 2026-08-25 on both installed builds against `can13`. CanModule's
+  socketcan vendor always enters `CanVendorSocketCan.cpp:49 "Configuring
+  SocketCAN device"` and shells out to `ip` to stop the link, set the bitrate and
+  restart it. Outcomes:
+
+  | build | settings | result |
+  |-------|----------|--------|
+  | v0.10.1 | `125k` / `DontConfigure` | `RTNETLINK answers: Operation not permitted` on both stop and bitrate -> `Failed to open CAN device: SOCKET_ERROR` |
+  | v0.10.2 | `DontConfigure` | no stop attempt; bitrate 0 -> `RTNETLINK answers: Invalid argument`, same failure, and **the port is left DOWN** |
+
+  Once the device fails to open, every frame gives
+  `Failed to send CAN frame: error code UNKNOWN_SEND_ERROR` and the startup SDO
+  read times out (`SW Version ?.?` in the node table). The OPC-UA endpoint still
+  opens normally, which makes the failure easy to miss.
+
+  `--force_dont_reconfigure` does **not** help: it logs `note: forcing
+  DontReconfigure mode as per command line args` (`DBus.cpp:107`) and then does
+  nothing, because `settings = "Unspecified";` on the next line is **commented
+  out** (`Device/src/DBus.cpp:109`). `DontConfigure` maps to bitrate 0
+  (`DBus.cpp:390`), which CanModule does not treat as "skip". `--map_to_vcan` is
+  the only thing that sets `vcan=true`, and it rewrites the port name to
+  `vcan<N>`, so it is useless for real hardware.
+
+  **Therefore: use `settings="125k"` and run with privileges** — `sudo`, or
+  `setcap cap_net_admin+ep` on a private copy of the binary (`/home` is not
+  `nosuid`, so file capabilities work). This is exactly what the lab's own
+  labTempMonitor does: `settings="125k"`, running as root.
+- The raw tool needs none of this. `elmbpsu_can.py` binds an `AF_CAN` socket and
+  never touches link configuration, so it works as an ordinary user — verified
+  with a passive `dump` on can13. It does require the link to already be up.
 - Server lifecycle, verified 2026-08-25 with a bus-less config on port 48012:
   starts fine under `nohup ... &`, binds the endpoint, and **exits cleanly on
   plain SIGTERM** (`kill <pid>`) as well as SIGINT. `systemd-run --user` also
@@ -533,6 +564,208 @@ Its claims about terminators, the separate control bus, floating outputs, and
 "powering the crate does not enable the branches" are all correct and confirmed.
 
 ---
+
+## 8b. First contact with the real crate (2026-08-25)
+
+The crate answered for the first time on this date. Everything below is measured,
+not inferred.
+
+**Node id is 57 (0x39), not 63.** A bus scan on `can13` at 125 kbit/s found
+exactly one node. Section 4.1 flagged 63 as a default rather than a guarantee;
+that caution was justified. `config-elmbpsu.xml` now carries `id="57"`.
+
+```
+node 57 (0x39) state: PRE-OPERATIONAL
+  hwVersion      = 0x30346C65   "el40"
+  swVersion      = 0x3334414D   "MA43"
+  swMinorVersion = 0x33303030   "0003"
+  serialNumber   = 0x3234334B   "K342"
+  guardTime      = 1000    lifeTime = 70
+```
+
+**The digital outputs are configured, commanded ON, and actually delivering.**
+
+```
+dioOutputMaskC  : 0xFF        <- both ports really are outputs
+dioOutputMaskA  : 0xFF
+doInitHigh      : 0x01        <- outputs come up HIGH after a power cycle
+DO word         : 0xFFFF      <- all 16 branch bits read back as 1
+NMT state       : OPERATIONAL <- once the server drove it there
+```
+
+`./elmbpsu_opcua.py mon --source tpdo`, read through the server from the crate's
+own ADC:
+
+```
+branch     CAN V      CAN I      AD V       AD I
+     0   11.841V    0.027A   11.910V    0.041A
+     1   11.932V    0.053A    8.957V    0.017A     <- AD rail low, and drifting
+     2   11.910V    0.006A   11.841V   -0.014A
+     3   11.887V   -0.000A   11.856V    0.013A
+     4   12.398V    0.044A   11.879V    0.003A
+     5   12.619V    0.034A   12.551V    0.009A
+     6   12.428V   -0.027A   11.902V  -18.050A     <- AD current channel not at 2.5V zero
+     7   11.849V  -18.606A   11.894V    6.551A     <- both current channels likewise
+     8    0.015V  -19.820A    0.015V  -19.827A
+     ...  (8..13 all ~0 V, current ~ -19.8 A)
+    14   12.467V   -0.055A   12.505V    0.011A
+    15   12.795V   -0.074A   12.490V   -0.044A
+```
+
+**Polarity is the production one (1 = ON), confirmed by measurement.** An earlier
+revision of this file hypothesised an old-style crate (0 = ON) on the strength of
+`DO word = 0xFFFF` together with a 0 V meter reading. That hypothesis was
+**wrong** and acting on it (adding `--invert`) would have switched every branch
+off. Ten of sixteen branches read 11.8-12.8 V on both rails with all bits at 1.
+Do not add `--invert` on this crate.
+
+**The original "every output pin measures 0 V" was a measurement artifact.** The
+rails float; measured against chassis they read nothing. Section 3 said so and it
+turned out to be the whole story. There was never a fault to find.
+
+**Reading branches 8-13.** Both rails ~0.01 V and both currents ~ -19.8 A. That
+is the signature of an absent module, not a failed one: an unpopulated ADC input
+reads ~0 uV, and 0 V through the current formula gives (0 - 2.5) x 8 = -20 A.
+Channels 32..55 are exactly branches 8..13, i.e. slots 4, 5 and 6. Confirm
+physically before concluding anything; nobody has looked in the crate.
+
+**Slot occupancy, confirmed from a full 64-channel read.**
+
+| slots | branches | voltage inputs | current inputs | reading |
+|-------|----------|----------------|----------------|---------|
+| 0,1,2,3,7 | 0-7, 14-15 | 11.8-12.8 V | at the 2.5 V zero (except below) | populated, powered |
+| 4,5,6 | 8-13 | 76-152 uV (~0) | 264000-409000 uV (0.26-0.41 V) | **empty** |
+
+The two input types fail differently and that is what makes the call solid: a
+branch voltage input sits behind a 100:1 divider to ground, so with no rail
+present it reads ~0. A current-sense input is high impedance and simply floats
+when no sensor is attached, landing at a few hundred mV and drifting from
+channel to channel (the twelve empty-slot current channels span 0.26-0.41 V and
+no two agree). An absent module gives exactly this pair of signatures. Contrast
+slot 7, physically the far end of the crate, which reads a healthy 12.47/12.51 V
+- so this is not "the scan stops after slot 3".
+
+**Branch 1 (slot 0, position B) AD rail is faulty.** Sampled every 4 s through
+TPDO3:
+
+```
+br0 CAN   br0 AD   br1 CAN   br1 AD
+ 11.833   11.910   11.925   11.429
+ 11.841   11.910   11.925    6.470
+ 11.841   11.910   11.925    8.804
+ 11.833   11.917   11.932   11.704
+ 11.841   11.910   11.925    5.989
+ 11.833   11.910   11.925    8.263
+ 11.833   11.910   11.925   11.475
+```
+
+Everything else is steady to +/-0.01 V; branch 1's AD rail swings between
+**5.99 V and 11.70 V**. The user independently reported the "channel B" Va/d LED
+flickering on the first module, which is this same branch. Two independent
+observations of one fault. Note the config uses `syncIntervalMs="10000"`, so
+these samples are aliased - the real oscillation is faster than 0.1 Hz. Drop
+syncIntervalMs to ~1000 to see its actual shape.
+
+**Branches 6 and 7 (slot 3): three of four current sensors read as floating.**
+
+| channel | role | raw uV | reading |
+|---------|------|--------|---------|
+| ch28 | br6 CAN I | 2496299 | -0.030 A, sensor correctly at its 2.5 V zero |
+| ch29 | br6 AD I  | 243915  | 0.244 V - floating |
+| ch30 | br7 CAN I | 174029  | 0.174 V - floating |
+| ch31 | br7 AD I  | 3309910 | 3.310 V, i.e. +6.5 A on an unloaded rail |
+
+ch29 and ch30 sit in the same 0.17-0.24 V band as the twelve current inputs of
+the confirmed-empty slots, i.e. they look disconnected rather than wrong. All
+four of slot 3's *voltage* channels are healthy (11.86-12.43 V), and one of its
+four current channels is perfect. That pattern - some contacts good, some
+open - points at a **partially seated module or a damaged sense harness**, not
+at the output stage. Reseat slot 3 and re-read before concluding anything.
+
+**The RPDO cache trap (hit for real on 2026-08-25, then fixed).** Switching a
+single branch off reported:
+
+```
+  DO word 0xFFFF -> 0xFFFE   (method: rpdo)
+  read back    0x0000
+  *** READ-BACK MISMATCH ***
+```
+
+Cause, confirmed by reading the server's own nodes: `do_word()` reads the ELMB's
+real latch (SDO 0x6200), which was `0xFFFF` from `doInitHigh`. The write went to
+`RPDO1.branch00`, a `RpdoCachedVariable`, which read-modify-writes the
+**server's** 8-byte shadow cache and transmits all of it
+(`DRpdoCachedVariable.cpp` `writeValue` -> `propagateCache`). That cache is
+initialised to zeros (`DRpdo.cpp` `m_cache.assign(8, 0)`) and had never
+transmitted, so it had no idea the crate had come up at `0xFFFF`. Clearing bit 0
+of `0x0000` transmits `0x0000` and switches **all sixteen** branches off.
+
+The read-back check caught it, which is exactly what it is there for. Afterwards
+cache and crate are in sync, which is why the following `on 0` matched cleanly.
+
+Fixed in `elmbpsu_opcua.py`: `--method rpdo` now writes the whole word through
+`RPDO1.do_write` instead of the per-branch Booleans, so the cache is overwritten
+wholesale and cannot diverge from intent. Verified with a no-op write of the
+already-latched value (`word 0x0001` -> read back `0x0001`), so no hardware state
+was changed to test it. The `branchNN` nodes stay in the address space for
+clients that track their own state. `elmbpsu_can.py` was never affected — it
+builds the full word itself and transmits its own RPDO.
+
+**Side effect on the crate:** the incident left only branch 0 on. Branches 1-7,
+14 and 15 had been on since power-up and are now off. `on all` restores them.
+
+**What the DO bit actually does to the hardware.** Measured, from the switch-off
+of branch 0:
+
+| | branch 0 switched OFF | slot 4 module ABSENT |
+|---|---|---|
+| voltage sense | 0.008 V | 0.015 V |
+| current sense | 0.012 A / 0.027 A, i.e. sensor at its 2.5 V zero | -19.82 A, i.e. sensor at ~0.02 V |
+
+Two things follow. The branch output is **genuinely dead**, indistinguishable at
+the sense point from an empty slot - not merely isolated behind a relay with a
+live rail on the far side. And the module's own monitoring electronics **stay
+powered**: the current sensor holds its 2.5 V zero point, which it could not do
+if it were fed from the branch rail it is measuring. So the bit switches the
+branch output, not the module.
+
+The framework agrees on intent: `fwElmbPSU_hardReset()`
+(`fwElmbPSU.ctl:1500`) is implemented as switch power off -> `delay(1)` ->
+switch power on, and is the official way to cold-boot the ELMBs sitting on a
+branch. CERN treats this as real removal of power and as a routine operation.
+
+**Not established, and not establishable from software:** whether the DO line
+drives the TRACO converter's Remote On/Off (inhibit) pin or a series switch in
+its output. Inhibit is much the more likely - it is a standard TRACO control
+input, it explains one bit switching both rails, and the alternative would leave
+sixteen converters idling unloaded. But nothing measured here proves it. It is a
+thirty-second question with a module in hand: look for a backplane DO line
+landing on the converter's Remote On/Off pin versus a series FET/relay in the
+output path, or check whether the converter stays cold with its branch off.
+
+**The Burndy pinout is still unknown and is not in any of the material here.**
+Searched `fwElmbPSU/`, `fwElmb/` and the PDF: the only hit is the phrase
+"'burndy' connector" in the introduction, and `fwElmbPSUBurndyRef.pnl` is a UI
+symbol carrying a right-click switch on/off menu, with no pin labels.
+`fwElmbPSU_burndy.bmp` remains a 47x46 px icon. It is not recoverable from this
+workspace - it needs EDMS (EDA-04145-V1-0) or the PH-ESS hardware page.
+
+**You do not need the pinout to find the rails.** Use the crate as its own
+signal generator: put the meter across a candidate pin pair, switch that branch
+off in software, and watch. Only the pair belonging to that branch changes.
+Details in README.md section 6.
+
+**`mon --source sdo` does not work on this crate.** The on-request analog reads
+at 0x2404 return `Bad` through the server (`aisdo_0`, `aisdo_1` both fail) while
+ordinary SDO reads on the same node are fine (`do_C_read` = 255, `stateAsText` =
+OPERATIONAL). The ADC itself is configured and scanning: `channelMax` = 64,
+`range` = 4, `mode` = 1, `aiTransmissionType` = 1, and TPDO3 delivers. The
+default for `mon` has been changed to `tpdo` accordingly; `sdo` is kept as the
+fallback for a crate whose `aiTransmissionType` is not 1.
+
+**Still unverified:** anything involving the OPC-UA server against the real
+crate. At the time of writing the server had only ever polled node 63 and so
+never exchanged a single frame with the crate.
 
 ## 8. What to do next / open items
 

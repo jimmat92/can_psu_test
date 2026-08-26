@@ -24,7 +24,7 @@ exist, and which of them are in use.
 ```
 
 Take an interface from the `FREE` line of its verdict. Everything below writes
-it as `can8`; substitute what you were given.
+it as `can13`; substitute what you were given.
 
 ### 2. Bring up the CAN interface
 
@@ -32,10 +32,10 @@ The ELMB PSU default is 125 kbit/s. Do this yourself rather than letting the
 server do it, so the server does not need elevated privileges.
 
 ```bash
-sudo ip link set can8 down
-sudo ip link set can8 type can bitrate 125000
-sudo ip link set can8 up
-ip -details -statistics link show can8
+sudo ip link set can13 down
+sudo ip link set can13 type can bitrate 125000
+sudo ip link set can13 up
+ip -details -statistics link show can13
 ```
 
 Look for `state ERROR-ACTIVE` and a non-zero bitrate. `state BUS-OFF`, or
@@ -44,18 +44,48 @@ trouble — fix that before going further.
 
 ### 3. Start the OPC-UA server
 
-Edit `config-elmbpsu.xml` first: set `Bus/@port` to the interface you picked in
-step 1, and `Node/@id` if your node is not 63. Since step 2 already set the
-bitrate, change `settings="125k"` to
-`settings="DontConfigure"` in that file. Then start it detached, so it survives
-you closing the terminal.
+`config-elmbpsu.xml` is already set to `port="can13"` and `settings="125k"`.
+Change `Bus/@port` if you picked a different interface, and `Node/@id` if your
+node is not 63.
+
+**The server must run with privileges.** CanModule opens a SocketCAN port by
+taking the link down, setting the bitrate and bringing it back up, and it does
+this unconditionally — `settings="DontConfigure"` and the
+`force_dont_reconfigure` flag do *not* switch it off on the builds installed
+here. Without privileges every call fails with
+`RTNETLINK answers: Operation not permitted`, the device never opens, and you
+get a stream of `Failed to send CAN frame: UNKNOWN_SEND_ERROR`.
+
+Because the server sets the bitrate itself, step 2 is optional — it will bring
+`can13` up for you.
+
+Foreground, so you can watch the SDO traffic (Ctrl-C stops it; drive the client
+from a second terminal):
 
 ```bash
-nohup /opt/labTempMonitor/bin/CanOpenOpcUa \
+sudo /opt/labTempMonitor/bin/CanOpenOpcUa \
+    --config_file  $PWD/config-elmbpsu.xml \
+    --opcua_backend_config $PWD/ServerConfig-elmbpsu.xml \
+    --lSdo INF --lNodeMgmt INF --print_cobids_tables
+```
+
+Or detached, so it survives you closing the terminal:
+
+```bash
+sudo nohup /opt/labTempMonitor/bin/CanOpenOpcUa \
     --config_file  $PWD/config-elmbpsu.xml \
     --opcua_backend_config $PWD/ServerConfig-elmbpsu.xml \
     --lSdo INF --lNodeMgmt INF --print_cobids_tables \
     > server.log 2>&1 &
+```
+
+If you would rather not run it as root, grant just the one capability it needs
+to a private copy:
+
+```bash
+mkdir -p ~/bin && cp /opt/labTempMonitor/bin/CanOpenOpcUa ~/bin/
+sudo setcap cap_net_admin+ep ~/bin/CanOpenOpcUa
+~/bin/CanOpenOpcUa --config_file $PWD/config-elmbpsu.xml ...
 ```
 
 `--opcua_backend_config` is **not optional here**, despite what `--help` says.
@@ -80,15 +110,20 @@ Watch the traffic passively. You should see the server's SYNC and node-guard
 requests going out, and replies from `0x7FF & (0x700 + 63)` = `73F` coming back.
 
 ```bash
-candump -ta can8
+candump -ta can13
 ```
 
 If nothing at all comes back, stop the server and probe every node id directly —
 this also catches a crate whose node id was changed from the default 63.
 
 ```bash
-./elmbpsu_can.py --iface can8 scan
+./elmbpsu_can.py --iface can13 scan
 ```
+
+**On this crate the scan returned node 57 (0x39), not the factory default 63.**
+That is why the server's first attempts showed `SW Version ?.?` — it was polling
+a node id that does not exist. `config-elmbpsu.xml` now says `id="57"`. If you
+ever move to a different crate, scan again before assuming.
 
 Still empty? Retry at 250000 and 50000 in step 2 before suspecting the wiring.
 Do not run `elmbpsu_can.py` commands other than `scan`/`dump` while the server
@@ -104,6 +139,15 @@ All 16 branches should report `OFF`.
 ```bash
 ./elmbpsu_opcua.py status
 ```
+
+Or without the server at all, straight over SocketCAN:
+
+```bash
+./elmbpsu_can.py --iface can13 --node 57 info
+./elmbpsu_can.py --iface can13 --node 57 status
+```
+
+Note `--node 57`: the tool's built-in default is the factory 63.
 
 ### 6. Switch one branch on, then off
 
@@ -126,6 +170,9 @@ with nothing plugged into the branch.
 ./elmbpsu_opcua.py on 0
 ./elmbpsu_opcua.py mon --branches 0
 ```
+
+`mon` defaults to `--source tpdo`, the SYNC-driven scan. `--source sdo` (the
+on-request 0x2404 reads) returns `n/a` on this crate — see HANDOFF.md §8b.
 
 ### Done
 
