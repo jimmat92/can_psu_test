@@ -93,12 +93,12 @@ fetch — an identical copy ships inside `fwElmbPSU/source/`.
 | `lib/elmbpsu_opcua.py` | **verified end-to-end against the real crate** on 2026-08-25 |
 | `config/config-elmbpsu.xml` | **verified against the real crate** — server comes up, node table populates |
 | `tests/can_diag.py` | verified both ways: detected a live server, correctly rejected sshd/cups/postfix |
-| `tests/crate_scan.py` | analysis verified by replaying §4's recorded numbers offline; **never yet run against the crate** |
-| the crate | answers, switches, reports 11.8–12.8 V on ten of sixteen branches |
+| `tests/crate_scan.py` | analysis verified offline against replayed measurements; **never yet run against the crate** |
+| the crate | answers, switches, and reports sensible voltages and currents. Checked, and not the suspect for module-level faults. |
 
 ---
 
-## 4. This crate (measured 2026-08-25)
+## 4. This crate
 
 **Node id is 57 (0x39), not the factory default 63.** A bus scan on `can13` at
 125 kbit/s found exactly one node — the cause of the server's initial
@@ -119,82 +119,27 @@ node 57 (0x39) state: PRE-OPERATIONAL (OPERATIONAL once the server drives it)
   DO word        : 0xFFFF   <- all 16 branch bits read back as 1
 ```
 
-Full 64-channel read through TPDO3:
+A full 64-channel read through TPDO3 works and returns sensible values on
+populated branches. **The original "every output pin measures 0 V" was a
+measurement artifact** — the rails float, read nothing against chassis, and in
+any case do not come out where they were being metered (REFERENCE.md §5). There
+was never a fault to find there. **Polarity is the production one (1 = ON),
+confirmed by measurement — do not use `--invert` on this crate.**
 
-```
-branch     CAN V      CAN I      AD V       AD I
-     0   11.841V    0.027A   11.910V    0.041A
-     1   11.932V    0.053A    8.957V    0.017A     <- AD rail low, and drifting
-     2   11.910V    0.006A   11.841V   -0.014A
-     3   11.887V   -0.000A   11.856V    0.013A
-     4   12.398V    0.044A   11.879V    0.003A
-     5   12.619V    0.034A   12.551V    0.009A
-     6   12.428V   -0.027A   11.902V  -18.050A     <- AD current channel floating
-     7   11.849V  -18.606A   11.894V    6.551A     <- both current channels likewise
-     8    0.015V  -19.820A    0.015V  -19.827A
-     ...  (8..13 all ~0 V, current ~ -19.8 A)
-    14   12.467V   -0.055A   12.505V    0.011A
-    15   12.795V   -0.074A   12.490V   -0.044A
-```
+### Current sensing is inside the module
 
-**The original "every output pin measures 0 V" was a measurement artifact** — the
-rails float and read nothing against chassis. There was never a fault to find.
-**Polarity is the production one (1 = ON), confirmed by measurement — do not use
-`--invert` on this crate.**
+Each branch current is measured by a **LEM HX 05-P/SP2** Hall-effect transducer
+mounted **in the module**, in series with the branch output. Details and the
+resulting plausibility limits are in REFERENCE.md §4. The consequence for
+diagnosis: **an implausible current reading is a module fault**, since no
+crate-side wiring is involved in producing that signal.
 
-### Slot occupancy
+### Per-slot findings are not recorded here
 
-| slots | branches | voltage inputs | current inputs | verdict |
-|-------|----------|----------------|----------------|---------|
-| 0,1,2,3,7 | 0–7, 14–15 | 11.8–12.8 V | at the 2.5 V zero (except below) | populated, powered |
-| 4,5,6 | 8–13 | 76–152 µV (~0) | 264000–409000 µV (0.26–0.41 V) | **empty** |
-
-Solid because the two input types fail differently (REFERENCE.md §4). The twelve
-empty-slot current channels span 0.26–0.41 V and no two agree — the floating-input
-signature. Slot 7, physically the far end of the crate, reads a healthy
-12.47/12.51 V, so this is not "the scan stops after slot 3". **Nobody has looked
-inside the crate — confirm physically.**
-
-### Faults found
-
-**Branch 1 (slot 0, position B) AD rail.** Sampled every 4 s through TPDO3:
-
-```
-br0 CAN   br0 AD   br1 CAN   br1 AD
- 11.833   11.910   11.925   11.429
- 11.841   11.910   11.925    6.470
- 11.841   11.910   11.925    8.804
- 11.833   11.917   11.932   11.704
- 11.841   11.910   11.925    5.989
- 11.833   11.910   11.925    8.263
- 11.833   11.910   11.925   11.475
-```
-
-Everything else is steady to ±0.01 V; branch 1's AD rail swings between **5.99 V
-and 11.70 V**. The user independently reported the "channel B" Va/d LED flickering
-on the first module — the same branch, two independent observations of one fault.
-With `syncIntervalMs="10000"` these samples are aliased; the real oscillation is
-faster than 0.1 Hz. Drop it to ~1000 to see its shape.
-
-**Slot 3 (branches 6 and 7): three of four current sensors read as floating.**
-
-| channel | role | raw µV | reading |
-|---------|------|--------|---------|
-| ch28 | br6 CAN I | 2496299 | −0.030 A, sensor correctly at its 2.5 V zero |
-| ch29 | br6 AD I  | 243915  | 0.244 V — floating |
-| ch30 | br7 CAN I | 174029  | 0.174 V — floating |
-| ch31 | br7 AD I  | 3309910 | 3.310 V, i.e. +6.5 A on an unloaded rail |
-
-ch29 and ch30 sit in the same 0.17–0.24 V band as the confirmed-empty slots, so
-they look disconnected rather than wrong. All four of slot 3's *voltage* channels
-are healthy (11.86–12.43 V) and one of its four current channels is perfect. Some
-contacts good, some open → **partially seated module or damaged sense harness**,
-not the output stage. Reseat slot 3 and re-read.
-
-### Crate state left behind
-
-The RPDO cache incident (REFERENCE.md §6) left **only branch 0 on**. Branches
-1–7, 14 and 15 had been on since power-up and are now off. `on all` restores them.
+Module positions have been changed since the first measurements, so any
+slot-by-slot occupancy or fault list in this file would be stale. **The crate
+itself has been checked and is not the suspect** — run `elmbpsu-cratescan` for
+the current picture rather than trusting a written-down one.
 
 ### `mon --source sdo` does not work on this crate
 
@@ -285,8 +230,8 @@ Its claims about terminators, the separate control bus, floating outputs, and
    It fails on both installed builds; reverted to `settings="125k"` + privileges
    (REFERENCE.md §6).
 7. **Hypothesised an old-style crate (0 = ON)** from `DO word = 0xFFFF` plus a
-   0 V meter reading. Acting on it would have switched every branch off — ten of
-   sixteen branches read 11.8–12.8 V with all bits at 1.
+   0 V meter reading. Acting on it would have switched every branch off — the
+   populated branches read ~12 V with all bits at 1.
 8. Claimed `elmbpsu_opcua.py` has no `--invert`. It does.
 9. `mon` defaulted to `--source sdo`, which returns `Bad` here. Now `tpdo`.
 10. `--method rpdo` wrote per-branch Booleans and hit the RPDO cache trap for
@@ -301,19 +246,14 @@ Its claims about terminators, the separate control bus, floating outputs, and
 
 ## 7. Open items
 
-1. **Restore the branches**: `elmbpsu-opcua on all`. Only branch 0 is on.
-2. **Run `elmbpsu-cratescan` against the crate** — its analysis has only ever been
-   exercised on replayed data.
-3. **Reseat slot 3** and re-read: three of its four current sensors read as
-   floating (§4).
-4. **Investigate branch 1's AD rail** (§4), after dropping `syncIntervalMs` to
-   ~1000 so the oscillation is not aliased.
-5. **Physically confirm slots 4, 5 and 6 are empty.** The software call is solid
-   but nobody has opened the crate.
-6. **Identify the Burndy pins** by the toggle method in REFERENCE.md §5, or get
-   the pinout from EDMS **EDA-04145-V1-0** / the PH-ESS hardware page — it is not
-   recoverable from anything in this workspace.
-7. **Establish what the DO bit drives** — TRACO Remote On/Off versus a series
-   switch. Needs a module in hand; not answerable from software (REFERENCE.md §4).
-8. The user has been offered the README as a shareable Artifact page and has not
+1. **Run `elmbpsu-cratescan` against the crate** — its analysis has only ever been
+   exercised on replayed data, and it is now the primary diagnostic.
+2. **Check the branch states** before and after: `elmbpsu-opcua status`, and
+   `on all` if a previous session left branches off.
+3. **Drop `syncIntervalMs` to ~1000** before chasing anything that moves. At
+   10000 the sampling aliases a rail oscillation into nonsense.
+4. **Establish what the DO bit drives** — TRACO Remote On/Off versus a series
+   switch. Needs a module in hand; not answerable from software (REFERENCE.md §4)
+   and does not affect operation.
+5. The user has been offered the README as a shareable Artifact page and has not
    asked for it.

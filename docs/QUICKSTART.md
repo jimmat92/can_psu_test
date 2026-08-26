@@ -144,8 +144,8 @@ elmbpsu-can --iface can13 --node 57 status
 ```
 
 Branch states depend on `doInitHigh`, `0x01` here, so a freshly power-cycled
-crate comes up with **all sixteen branches ON**. At the time of writing only
-branch 0 is on — `elmbpsu-opcua on all` restores the rest.
+crate comes up with **all sixteen branches ON**. If a previous session left some
+off, `elmbpsu-opcua on all` restores them.
 
 ### 6. Switch one branch on, then off
 
@@ -157,9 +157,9 @@ elmbpsu-opcua on 0
 elmbpsu-opcua off 0
 ```
 
-Measure the Burndy between each positive pin and **its own return**, never
-against chassis — both rails float. No pinout? You do not need it; switching a
-branch off and watching which pin pair drops identifies it
+**Do not try to confirm this with a multimeter.** The rails float and leave on
+the module's rear-side connector, reaching the outside world through crate
+cabling whose routing is installation-specific — step 7 is the check
 ([REFERENCE.md](REFERENCE.md) §5).
 
 ### 7. Read the voltage and current
@@ -170,8 +170,9 @@ elmbpsu-opcua mon --branches 0
 ```
 
 Expect ~12 V on both rails and small currents (~20 mA CAN, ~25 mA AD) unloaded.
-~0.01 V with about −19.8 A is an **empty slot**, not a fault —
-[REFERENCE.md](REFERENCE.md) §4 has the full pattern table.
+~0.01 V with about −19.8 A is an **empty slot**, not a fault: the current
+transducer is in the module, so with no module nothing drives that input
+([REFERENCE.md](REFERENCE.md) §4 has the full pattern table).
 
 `mon` defaults to `--source tpdo`; `--source sdo` returns `n/a` on this crate.
 TPDO3 refreshes once per SYNC, i.e. every `syncIntervalMs` — 10 s by default, so
@@ -220,13 +221,15 @@ It reports **per slot, not per branch** — a module spans branches `2*slot` and
   hundred mV, so a stdev test alone would pass it.
 
 Exit status is 0 only if nothing was found. It ends with a `SUSPECT MODULES`
-line: the slots to pull.
+line: the slots to pull. **A fault it names is a module fault** — the voltage
+divider and the current transducer are both in the module, so the crate is not
+in the signal path.
 
 Presence is decided from the **current** inputs. A voltage input reads ~0
-whether the branch is off or the slot is empty, but a current input is held at
-2.5 V by a reference the module powers itself — so it stays at 2.5 V with the
-branch off and floats only when there is no module. That is why the all-off step
-is a measurement and not just a switch test ([REFERENCE.md](REFERENCE.md) §4).
+whether the branch is off or the slot is empty, but the module's transducer
+holds its input at 2.5 V even with the branch switched off, and the input floats
+only when there is no module. That is why the all-off step is a measurement and
+not just a switch test ([REFERENCE.md](REFERENCE.md) §4).
 
 **It power-cycles every branch.** Use `--skip-switch-test` if anything is
 plugged in that should not be. With `syncIntervalMs` at 10000 each of the ~8

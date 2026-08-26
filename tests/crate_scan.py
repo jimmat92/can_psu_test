@@ -25,17 +25,24 @@ differently, and that is the whole trick:
     voltage input   100:1 divider to ground -- reads ~0 whenever no rail is
                     present, whether the branch is off or the slot is empty.
                     Useless on its own for presence.
-    current input   high impedance, held at 2.5 V by the sensor's own zero
-                    reference. That reference is powered by the module's
-                    housekeeping supply, NOT by the switched rail, so it
-                    keeps sitting at 2.5 V with the branch switched off.
-                    With no module in the slot nothing drives the line at
-                    all and it floats at a few hundred mV.
+    current input   driven by a LEM HX 05-P/SP2 Hall transducer mounted IN
+                    THE MODULE, in series with the branch output. It is
+                    powered by the module's housekeeping supply, NOT by the
+                    switched rail, so it keeps sitting at its 2.5 V zero
+                    with the branch switched off. With no module in the slot
+                    nothing drives the line and it floats at a few hundred mV.
 
 So: "current input parked at 2.5 V" == a module is in that slot and its
 monitoring electronics are alive. That test is valid in the OFF state as
 well as the ON state, which is why step 2 is a measurement and not just a
 switch test.
+
+The transducer is rated 5 A nominal / approx +-15 A, which is exactly the
+conversion constants: 2.5 V is zero and 0.625 V of departure is 5 A. Its
+whole range therefore spans 0.625 V to 4.375 V at the ADC pin, so a reading
+outside that band is not a current measurement at all -- the transducer
+cannot produce it. Since it lives in the module, an implausible current is
+a MODULE fault; no crate-side wiring is involved in making that signal.
 
 The server is started as a context manager, so it is stopped on every exit
 path -- success, a failed check, Ctrl-C or any exception. Branch states are
@@ -69,6 +76,13 @@ except ImportError as exc:
 
 QUANTITIES = (("canv", "CAN V", "V"), ("cani", "CAN I", "A"),
               ("adv", "AD V", "V"), ("adi", "AD I", "A"))
+
+# LEM HX 05-P/SP2: 2.5 V at zero current, 5 A nominal at 0.625 V of departure,
+# measurable to about +-15 A. So the transducer can only ever put 0.625..4.375 V
+# on the ADC pin, and a reading outside that band is not a current at all.
+LEM_RANGE_A = 15.0
+LEM_MIN_V = 2.5 - LEM_RANGE_A * 0.625 / 5.0     # 0.625 V
+LEM_MAX_V = 2.5 + LEM_RANGE_A * 0.625 / 5.0     # 4.375 V
 
 
 # --------------------------------------------------------------- config
@@ -157,14 +171,20 @@ def branch_view(samples, branch):
 # ------------------------------------------------------- classification
 def classify_current(sample, tol):
     """What a current-sense input is telling us, judged at the ADC pin rather
-    than after conversion -- see the module docstring."""
+    than after conversion -- see the module docstring.
+
+    Outside LEM_MIN_V..LEM_MAX_V the transducer physically cannot be the
+    source, whatever the number converts to, so that is "undriven" on the
+    datasheet rather than on a tolerance we picked."""
     if not sample.ok:
         return "unreadable"
     v = adc_volts(sample.uv)
     if abs(v - 2.5) <= tol:
-        return "zero"          # sensor present, powered, carrying ~no current
+        return "zero"          # transducer present, powered, carrying ~no current
+    if v < LEM_MIN_V or v > LEM_MAX_V:
+        return "undriven"      # beyond +-15 A: nothing is driving this line
     if v < 2.5 - tol:
-        return "undriven"      # nothing holding the line up: no module / open contact
+        return "undriven"      # below the zero on an unloaded rail
     return "implausible"       # above the zero reference on an unloaded rail
 
 
@@ -293,15 +313,15 @@ def analyse(data, stats, args):
         elif alive and undriven:
             verdict = "POPULATED*"
             detail = (f"module present but {len(undriven)} of 4 sense lines are "
-                      "not driven -- partially seated module or damaged harness")
+                      "not driven -- transducer or its connection in this module")
         elif len(alive) == 4 and len(rails_up) < n_expect:
             verdict = "POPULATED*"
             detail = (f"sensors all alive but only {len(rails_up)} of {n_expect} "
                       "commanded rails came up -- output stage or rail fault")
         elif not alive and rails_up:
             verdict = "POPULATED*"
-            detail = ("rails are up but no sensor holds its zero -- contradictory, "
-                      "check the sense harness")
+            detail = ("rails are up but no transducer holds its zero -- "
+                      "contradictory, suspect this module's sense electronics")
         else:
             verdict, detail = "POPULATED*", "mixed evidence, see the channel table"
         slots[s] = {"branches": list(branches), "verdict": verdict,
@@ -358,11 +378,17 @@ def analyse(data, stats, args):
                         "came back bad", True)
                     continue
                 if unit == "A" and abs(st["adc_mean"] - 2.5) > args.i_zero_tol:
-                    how = "nothing driving it" if st["adc_mean"] < 2.5 \
-                          else "above the zero reference"
+                    adc = st["adc_mean"]
+                    if adc < LEM_MIN_V or adc > LEM_MAX_V:
+                        how = ("outside the transducer's own "
+                               f"{LEM_MIN_V:.3f}-{LEM_MAX_V:.3f} V range, so "
+                               "nothing is driving it")
+                    else:
+                        how = ("below the zero" if adc < 2.5
+                               else "above the zero reference")
                     stability[(b, key)] = (
-                        "FAIL", f"sense line reads {st['adc_mean']:.3f} V at the "
-                        f"ADC pin, not the sensor's 2.5 V zero -- {how} "
+                        "FAIL", f"sense line reads {adc:.3f} V at the ADC pin, "
+                        f"not the transducer's 2.5 V zero -- {how} "
                         f"({st['mean']:.3f} A is what that converts to, not a "
                         "real current)", True)
                     continue
@@ -517,38 +543,34 @@ def _branches_str(slots):
 
 
 def _print_interpretation(res, suspect):
-    """Which side of the connector a fault is on. The current sensors and
-    their 2.5 V references live ON THE MODULE, not on the crate backplane --
-    docs/REFERENCE.md s4 measured it: pulling a module makes its sense lines
-    float, while merely switching its branch off leaves them parked at 2.5 V.
-    A crate-side sensor would keep its reference either way."""
+    """What a fault here means. The current transducer (LEM HX 05-P/SP2) is
+    mounted in the module and the voltage divider is on the module too, so
+    nothing the crate does can produce or fix a bad reading -- see
+    docs/REFERENCE.md s4."""
     sense_faults = [s for s in suspect if res["slots"][s]["undriven"]]
-    print("\n  Where the fault sits (the sense electronics are on the MODULE, "
-          "not the crate --")
-    print("  docs/REFERENCE.md s4: pulling a module makes its sense lines float, "
-          "switching")
-    print("  its branch off does not, which a crate-side sensor could not do):")
+    print("\n  What this means (the sense electronics -- the 100:1 divider and "
+          "the")
+    print("  LEM HX 05-P/SP2 current transducer -- are inside the MODULE, so a "
+          "fault")
+    print("  named above is a module fault, not a crate one):")
     if sense_faults:
         plural = "s" if len(sense_faults) > 1 else ""
         print(f"    Slot{plural} {', '.join(str(s) for s in sense_faults)} "
               f"ha{'ve' if plural else 's'} sense lines that nothing drives while")
         print("    other channels of the same module are fine. A module that was "
               "simply dead")
-        print("    could not produce the good channels, so this is a CONTACT "
-              "problem, at the")
-        print("    module-to-backplane connector or in the harness.")
-        print("      1. reseat the module and re-run this script.")
-        print("      2. if it persists, move that module to a slot this run "
-              "called healthy:")
-        print("         fault follows the module -> the module is bad;")
-        print("         fault stays with the slot -> the crate backplane is bad.")
+        print("    could not produce the good channels, so the transducer or its "
+              "connection")
+        print("    inside that module has failed.")
+        print("      1. reseat the module once, to rule out a partly-made "
+              "connector, and re-run.")
+        print("      2. if it persists, replace the module.")
     else:
         print("    No undriven sense lines: every module that is present is "
               "reporting.")
-        print("    Faults listed above are rail/output or stability problems, "
-              "which are on")
-        print("    the module's own converter -- swap-test the same way if you "
-              "need proof.")
+        print("    Faults listed above are rail/output or stability problems in "
+              "the")
+        print("    module's own converter.")
 
 
 # ----------------------------------------------------------------- main

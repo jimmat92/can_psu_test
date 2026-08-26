@@ -147,12 +147,14 @@ are signed microvolts:
 
 ```
 voltage [V] = raw/1e6 * 100.0                    (100:1 divider on the module)
-current [A] = (raw/1e6 - 2.5) * 5.0 / 0.625      (2.5 V-centred sensor, 8 A/V)
+current [A] = (raw/1e6 - 2.5) * 5.0 / 0.625      (2.5 V zero, 5 A per 0.625 V)
 ```
 
-Nominal per branch: 12.0 V on both rails, 20 mA CAN and 25 mA AD unloaded. What
-each *abnormal* reading means is tabulated in
-[docs/REFERENCE.md](docs/REFERENCE.md) §4.
+Nominal per branch: 12.0 V on both rails, 20 mA CAN and 25 mA AD unloaded.
+Current comes from a **LEM HX 05-P/SP2** Hall transducer inside the module —
+5 A nominal, ±15 A range, 2.5 V at zero — so a reading outside 0.625–4.375 V at
+the ADC pin is not a current at all. What each abnormal reading means is
+tabulated in [docs/REFERENCE.md](docs/REFERENCE.md) §4.
 
 ## 5. The OPC-UA route
 
@@ -203,19 +205,19 @@ read-only. See [docs/QUICKSTART.md](docs/QUICKSTART.md).
    `--method sdo`.
 2. **Read-back OK but no volts.** Fault is downstream: blown fuse, module not
    fully seated, protection tripped, defective switching element. Compare
-   against a known-good module in the same slot. A floating current sense with a
-   healthy voltage points at seating, not the output stage.
-3. **Measuring wrong.** Both rails float — measure positive against **its own
-   return**, never chassis. This was the entire original "every output reads
-   0 V" report.
+   against a known-good module in the same slot.
+3. **Trusting a multimeter.** The rails float and leave on the module's
+   rear-side connector, reaching the outside world through crate cabling whose
+   routing is installation-specific — hand-metering is not a check. Use the
+   readout, [docs/REFERENCE.md](docs/REFERENCE.md) §5.
 4. **Wrong polarity.** `on` gives nothing and `off` gives 12 V → old-style
    crate, add `--invert`. Not this one.
 5. **Byte order.** A legacy generator in `fwElmbUser.ctl` labels RPDO1 byte 0 as
    port F, not port C. If exactly the wrong half of the branches respond, that
    is the tell — `--method sdo` sidesteps it.
 
-No Burndy pinout? You do not need it — use the crate as its own signal
-generator, [docs/REFERENCE.md](docs/REFERENCE.md) §5.
+An implausible **current** reading is a module fault, not a crate one — the
+transducer is inside the module ([docs/REFERENCE.md](docs/REFERENCE.md) §4).
 
 ## 7. Making the crate come up powered
 

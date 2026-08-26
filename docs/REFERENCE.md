@@ -17,12 +17,13 @@ root — `fwElmbPSU/`, `fwElmb/`, `CanOpenOpcUa/` — plus
 
 Up to 8 modules in 8 slots, 2 branches per module, 16 branches total.
 
-Each branch's Burndy connector carries **two independent 12 V rails** — a *CAN*
-rail (~25 W) and an *AD* (analog/digital) rail (~35 W). Monitored separately,
-switched together by **one** control bit.
+Each branch carries **two independent 12 V rails** — a *CAN* rail (~25 W) and an
+*AD* (analog/digital) rail (~35 W). Monitored separately, switched together by
+**one** control bit. They leave the module on its rear-side connector and reach
+the outside world through the crate's own harness (§5).
 
-**Both rails float.** Measured against chassis they read nothing; measure each
-positive against **its own return**. This one fact accounts for the entire
+**Both rails float**, and read nothing against chassis. That is why hand-metering
+is not the way to check an output — see §5 — and it accounts for the entire
 "every output reads 0 V" report that started this project.
 
 Branch outputs are **not** enabled by mains power. One control ELMB inside the
@@ -73,9 +74,9 @@ assuming the CAN interface must supply V+ on DE-9 pin 9.
 
 ### External references not held here
 
-- Burndy pinout: EDMS **EDA-04145-V1-0**, or the PH-ESS hardware page
-  <http://ess.web.cern.ch/ESS/canpsuProject/index.htm>. It is in no material in
-  this workspace.
+- PH-ESS hardware page: <http://ess.web.cern.ch/ESS/canpsuProject/index.htm>;
+  connector drawings are EDMS **EDA-04145-V1-0**. Neither is needed to operate
+  the crate — see §5.
 - Branch connection scheme: <https://edms.cern.ch/file/685351//CANbus_Guideline.pdf>
 - fwElmbPSU / fwElmb downloads:
   <http://atlas.web.cern.ch/Atlas/GROUPS/DAQTRIG/DCS/ELMB/DIST/ELMBdoc.html>
@@ -170,43 +171,84 @@ with x1 = 2.5, x2 = 5.0, x3 = 0.625:
 
 ```
 voltage [V] = raw/1e6 * 100.0                 (100:1 divider on the module)
-current [A] = (raw/1e6 - 2.5) * 5.0 / 0.625   (2.5 V-centred sensor, 8 A/V)
+current [A] = (raw/1e6 - 2.5) * 5.0 / 0.625   (2.5 V zero, 5 A per 0.625 V)
 ```
 
 Nominal per branch, from `fwElmbPSUConstants.ctl`: 12.0 V on both rails, 20 mA
 CAN / 25 mA AD unloaded.
 
+### The current transducer
+
+Each branch current is measured by a **LEM HX 05-P/SP2**, a Hall-effect current
+transducer **mounted in the module**, in series with the branch output through
+its primary terminals (pins 5 → 6). An internal Hall element senses the magnetic
+field of that current, and the measurement side is galvanically isolated from
+the current path — LEM specify a 3 kV insulation test voltage — which is what
+lets the ELMB read the current of a floating 12 V output without bonding its ADC
+to it.
+
+| | |
+|---|---|
+| nominal current | **5 A** |
+| measurable range | approximately **±15 A** |
+| output at zero current | **2.5 V** |
+
+The datasheet numbers are exactly the framework's conversion constants: 2.5 V is
+the zero, and `× 5.0/0.625` maps a 0.625 V departure from it to the 5 A nominal
+current. So the transducer's whole ±15 A range spans **0.625 V to 4.375 V** at
+the ADC pin, and that gives a hard plausibility test:
+
+> **An ADC reading outside 0.625–4.375 V is not a current measurement.** The
+> transducer cannot produce it, so the line is floating, not carrying 18 A.
+
+Because the transducer is inside the module, an implausible current reading is a
+**module** fault — a floating sense line means that module's transducer or its
+connection is not delivering a signal, and no crate-side wiring can cause or fix
+it. `tests/crate_scan.py` checks plausibility before stability for this reason:
+an undriven line sits rock steady at a few hundred mV and would sail through a
+stdev test.
+
 ### Reading the monitoring values — what each pattern means
 
-The two input types fail *differently*, and that is what makes a software
-diagnosis solid. A voltage input sits behind a 100:1 divider to ground, so with
-no rail present it reads ~0. A current-sense input is high impedance and floats
-when nothing drives it, landing at a few hundred mV and drifting from channel to
-channel.
+The two input types fail *differently*, which is what makes a software diagnosis
+solid. A voltage input sits behind a 100:1 divider to ground and reads ~0 with no
+rail present. A current input is high impedance and floats when the transducer is
+not driving it, landing at a few hundred mV — below the transducer's own floor.
 
 | pattern | means |
 |---------|-------|
 | ~12 V on both rails, current at the 2.5 V zero (≈0 A) | branch populated, on, healthy |
-| **V ≈ 0.01 V and I ≈ −19.8 A** | **module absent.** 0 V through the current formula gives (0 − 2.5) × 8 = −20 A |
-| V healthy, but I sits at 0.17–0.41 V (nonsense current) | **that current-sense line is floating** — partially seated module or damaged sense harness, not an output fault |
+| **V ≈ 0.01 V and I ≈ −19.8 A** | **module absent.** An undriven input near 0 V runs through the formula as (0 − 2.5) × 8 = −20 A, well outside the transducer's range |
+| V healthy, but I sits at 0.17–0.41 V | **that current line is floating** — the module's transducer or its connection, not an output fault |
 | V ≈ 0.008 V, but I still at its 2.5 V zero | **branch switched OFF.** The output is dead; the module's own monitoring electronics are still powered |
 
 The last two rows are the useful ones: an off branch and an absent module are
 identical on the voltage channel and are told apart entirely by the current
 channel.
 
+Per slot (a module spans branches 2s and 2s+1):
+
+| the slot's four current channels | means |
+|---|---|
+| all four float, all four voltages ~0 | **no module**, or one making no contact at all |
+| **some** float, others hold 2.5 V | the module is there and partly working — a partial contact or a failed transducer |
+| all four hold 2.5 V, a rail stays down | sensing is fine; the fault is the module's **converter or output stage** |
+
+A partial pattern can never be a dead module — a dead module could not produce
+the good channels. `tests/crate_scan.py` applies exactly this ladder.
+
 ### What the DO bit does to the hardware
 
-Measured, comparing a branch switched off against a genuinely empty slot:
+Comparing a branch switched off against an empty slot:
 
 | | branch switched OFF | module ABSENT |
 |---|---|---|
 | voltage sense | 0.008 V | 0.015 V |
-| current sense | 0.012 A / 0.027 A — sensor at its 2.5 V zero | −19.82 A — sensor at ~0.02 V |
+| current sense | sensor at its 2.5 V zero | ~0.02 V, i.e. undriven |
 
 The branch output is **genuinely dead**, indistinguishable at the sense point
 from an empty slot — not merely isolated behind a relay with a live rail beyond
-it. And the module's monitoring electronics **stay powered**: the current sensor
+it. And the module's monitoring electronics **stay powered**: the transducer
 holds its 2.5 V zero, which it could not do if it were fed from the rail it
 measures. **The bit switches the branch output, not the module.**
 
@@ -214,71 +256,37 @@ The framework agrees on intent: `fwElmbPSU_hardReset()` (`fwElmbPSU.ctl:1500`)
 is switch off → `delay(1)` → switch on, the official way to cold-boot ELMBs
 sitting on a branch. CERN treats this as real removal of power and as routine.
 
-### Which side of the connector the sensors are on
-
-**The current sensors and their 2.5 V references are on the MODULE, not the
-crate backplane** — which decides how every faulty reading is read. From the two
-measurements above: a removed module leaves that slot's four current-sense
-channels floating at 0.17–0.41 V, no two alike, while a module present but
-switched **off** parks them at 2.5 V. A crate-side sensor, fed from crate
-housekeeping power, would hold its reference in *both* cases and read zero
-current into an empty slot. It does not, so the signal source leaves with the
-module and the analog line crosses the module-to-backplane connector. (Strictly
-this locates the *source*, not which PCB the chip is soldered to: a backplane
-sensor powered solely through a module-supplied rail would look identical.
-Contrived, nothing suggests it, not ruled out.)
-
-The reading rules that follow, per slot (a module spans branches 2s and 2s+1):
-
-| the slot's four current channels | means |
-|---|---|
-| all four float, all four voltages ~0 | **no module**, or one making no contact at all |
-| **some** float, others hold 2.5 V | module is there and partly working → a **contact** problem. Reseat, re-run. |
-| all four hold 2.5 V, a rail stays down | contact is fine; the fault is the module's **converter or output stage** |
-
-A partial pattern can never be a dead module — a dead module could not produce
-the good channels. To separate a bad module from a bad slot after reseating, move
-that module to a slot this scan called healthy: the fault following the module
-means the module, staying with the slot means the crate backplane.
-`tests/crate_scan.py` applies exactly this ladder.
-
-**Not establishable from software:** whether the DO line drives the TRACO
-converter's Remote On/Off (inhibit) pin or a series switch in its output.
-Inhibit is much the more likely — standard TRACO control input, explains one bit
-switching both rails, and the alternative leaves sixteen converters idling
-unloaded — but nothing measured proves it. With a module in hand: look for a
-backplane DO line landing on the converter's Remote On/Off pin versus a series
-FET/relay in the output path, or check whether the converter stays cold with its
-branch off.
+Still open: whether the DO line drives the TRACO converter's Remote On/Off
+(inhibit) pin or a series switch in its output. Inhibit is much the more likely —
+standard TRACO control input, explains one bit switching both rails, and the
+alternative leaves sixteen converters idling unloaded — but nothing measured
+proves it, and it changes nothing operationally.
 
 ---
 
-## 5. Finding the rails on the Burndy without a pinout
+## 5. Where the branch outputs go, and why you should not meter them
 
-The pinout is not in this workspace — the only hit across `fwElmbPSU/`,
-`fwElmb/` and the PDF is the phrase "'burndy' connector"
-(`fwElmbPSUBurndyRef.pnl` is a UI symbol with no pin labels,
-`fwElmbPSU_burndy.bmp` a 47×46 px icon). **You do not need it.**
+The two 12 V rails leave the module on its **rear-side connector**. The crate is
+then supposed to route them to its rear-panel connectors and out through a large
+multi-channel **radial connector**. That routing is crate cabling — it depends on
+the harness having been made up correctly for this particular crate, and it is
+not described by anything in this workspace or in the module documentation.
 
-Both rails float and are isolated from each other and from chassis, so probe
-**pin to pin, never pin to chassis**, and let the software tell you which pair
-you found:
+**So metering the outputs by hand is impractical**, and this is a deliberate
+decision, not a gap to fill in later. You cannot tell which radial-connector pin
+belongs to which branch without tracing the crate's own harness; both rails
+float, so there is no chassis reference to probe against; and a wrong reading
+tells you nothing about whether the module or the cabling is at fault.
+
+**Use the readout instead.** The ELMB's ADC sits upstream of all that cabling,
+reading the module's own voltage divider and current transducer, so
+`tests/crate_scan.py` characterises the module itself regardless of how the crate
+is wired downstream:
 
 ```bash
-elmbpsu-opcua mon --branches 0     # confirm it is on and what the crate delivers
-elmbpsu-opcua off 0                # meter across a candidate pin pair, then this
-elmbpsu-opcua on 0                 # whatever dropped to 0 V is branch 0
+elmbpsu-cratescan -n 10 --json scan.json
+elmbpsu-opcua mon --branches 0-3        # spot check
 ```
-
-Sweep by holding one probe on a fixed pin, walking the other across the rest,
-then moving the fixed probe on by one. Each branch has four power contacts —
-CAN +12 V and return, AD +12 V and return — plus the branch CAN signals, so you
-want two independent ~12 V pairs.
-
-Two traps: crate-side Burndy contacts are usually recessed and a standard probe
-tip may not reach them, so use a mating connector or a fine tip; and check the
-front-panel CAN/AD LEDs first, which tell you which branches are live before you
-probe anything.
 
 ---
 
