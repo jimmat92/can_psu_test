@@ -60,13 +60,9 @@ from the crate is power-cycled. Use --skip-switch-test for a read-only run.
 import argparse
 import contextlib
 import json
-import os
-import re
 import statistics
 import socket
-import subprocess
 import sys
-import tempfile
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -75,8 +71,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 try:
     from elmbpsu_server import OpcUaServer, ServerError
-    from elmbpsu_opcua import (PsuCrate, NS_URI, branch_channels, branch_label,
-                               adc_volts, to_volts, to_amps)
+    from elmbpsu_opcua import (PsuCrate, NS_URI, branch_channels, adc_volts,
+                               to_volts, to_amps)
     from asyncua.sync import Client
 except ImportError as exc:
     sys.exit(f"error: cannot import required modules ({exc}).\n"
@@ -92,7 +88,6 @@ LEM_RANGE_A = 15.0
 LEM_MIN_V = 2.5 - LEM_RANGE_A * 0.625 / 5.0     # 0.625 V
 LEM_MAX_V = 2.5 + LEM_RANGE_A * 0.625 / 5.0     # 4.375 V
 
-SYNC_CONFIG_PREFIX = "config-elmbpsu-sync"      # see faster_sync_config()
 # The ELMB works up its channel list instead of sampling all 64 at once, and
 # on this crate a channel comes round again about every 11 s: 82% of readings
 # taken 2 s apart were bit-identical, i.e. only 18% of the channels had been
@@ -124,43 +119,6 @@ def bus_interval_s(config_file, attr, fallback=10.0):
             except ValueError:
                 break
     return fallback
-
-
-def faster_sync_config(path, ms):
-    """A temp copy of the server config with Bus/@syncIntervalMs lowered to
-    `ms`, or None if it is already at least that fast (or unreadable). A text
-    substitution rather than an XML rewrite, so the copy differs from the
-    original in exactly one number and keeps its comments."""
-    try:
-        text = Path(path).read_text()
-    except OSError:
-        return None
-    m = re.search(r'syncIntervalMs="(\d+)"', text)
-    if not m or int(m.group(1)) <= ms:
-        return None
-    text = text[:m.start()] + f'syncIntervalMs="{ms}"' + text[m.end():]
-    fd, tmp = tempfile.mkstemp(prefix=f"{SYNC_CONFIG_PREFIX}{ms}-", suffix=".xml")
-    with os.fdopen(fd, "w") as fh:
-        fh.write(text)
-    os.chmod(tmp, 0o644)          # under sudo the server reads it as root
-    return tmp
-
-
-def stale_scan_pid(binary):
-    """A CanOpenOpcUa left over from an earlier scan run, recognised by the
-    temp config those runs hand it. OpcUaServer identifies its process by
-    --config_file, so a run that dies without cleaning up would be invisible
-    to the next one -- which would then start a second CANopen master on the
-    same bus. Matching the binary alone is not safe: the lab temperature
-    monitor is the same binary on another bus."""
-    try:
-        out = subprocess.check_output(
-            ["pgrep", "-f", f"^{re.escape(binary)}.*{SYNC_CONFIG_PREFIX}"],
-            text=True, stderr=subprocess.DEVNULL)
-    except Exception:
-        return None
-    pids = [int(x) for x in out.split()]
-    return pids[0] if pids else None
 
 
 # ---------------------------------------------------------- measurement
@@ -264,13 +222,25 @@ def scan_until_stable(crate, nodes, prev, sync_s, args, label=""):
 
     Failing that, it gives up at --settle-timeout and says which rails were
     still moving, instead of handing back an unsettled scan as though it were a
-    measurement."""
+    measurement.
+
+    The scans themselves are cheap -- TPDO3.chNN.value is the server's own
+    SYNC-driven cache, so reading it puts nothing on the CAN bus -- but there
+    is no point taking one every SYNC when the answer cannot change until a
+    whole window has passed. Four to the window is plenty, and it keeps the
+    loop off the bus for real with --source sdo, where every read IS a CAN
+    transfer."""
     t0 = time.monotonic()
+    poll = max(1.0, sync_s, args.settle_window / 4.0)
     history = []                       # (when, samples), oldest first
     last = prev
     while True:
+        started = time.monotonic()
         samples = measure(crate, nodes, last, sync_s, args.source, label,
                           quiet=True)
+        spare = poll - (time.monotonic() - started)
+        if spare > 0:
+            time.sleep(spare)
         now = time.monotonic()
         last = samples
         older = [s for when, s in history if now - when >= args.settle_window]
@@ -1047,11 +1017,6 @@ def main():
                         "(default: nodeGuardIntervalMs + syncIntervalMs + 10s)")
     g.add_argument("--sync-interval-ms", type=float, default=None,
                    help="override the Bus/@syncIntervalMs read from the config")
-    g.add_argument("--fast-sync", type=int, default=1000, metavar="MS",
-                   help="run our own server off a copy of the config with "
-                        "Bus/@syncIntervalMs set to this, since every scan "
-                        "costs one SYNC period (default 1000; 0 = use the "
-                        "config as it is). Ignored with --use-running-server.")
     args = p.parse_args()
 
     if args.v_on_min is None:
@@ -1064,22 +1029,9 @@ def main():
     if args.samples < 2:
         print("warning: --samples < 2, so there is nothing to take a variance of")
 
-    def new_server(config_file):
-        return OpcUaServer(config_file=config_file,
-                           opcua_backend_config=args.opcua_backend_config,
-                           use_sudo=not args.no_sudo)
-
-    server = new_server(args.config_file)
-    # Every scan costs one SYNC period -- TPDO3 only refreshes then -- and the
-    # shipped config syncs every 10 s, so the wait dominates the whole run.
-    # When we own the server we start it from a copy of the config with a
-    # shorter SYNC; that is the only real lever on how long this takes.
-    tmp_config = None
-    if args.fast_sync and not args.use_running_server:
-        tmp_config = faster_sync_config(server.config_file, args.fast_sync)
-        if tmp_config:
-            server = new_server(tmp_config)
-
+    server = OpcUaServer(config_file=args.config_file,
+                         opcua_backend_config=args.opcua_backend_config,
+                         use_sudo=not args.no_sudo)
     sync_s = (args.sync_interval_ms / 1000.0 if args.sync_interval_ms is not None
               else bus_interval_s(server.config_file, "syncIntervalMs"))
     nodeguard_s = bus_interval_s(server.config_file, "nodeGuardIntervalMs")
@@ -1101,32 +1053,21 @@ def main():
           "rails take to settle"
           + ("" if args.skip_switch_test
              else "\n            every branch is switched OFF and back ON"))
-    if args.verbose:
-        if tmp_config:
-            print(f"            SYNC lowered to {args.fast_sync} ms for this run "
-                  f"({Path(tmp_config).name})")
-        elif sync_s >= 5.0:
-            print(f"            tip: syncIntervalMs is {sync_s * 1000:.0f} ms in "
-                  f"{Path(server.config_file).name}; 1000 runs this ten times "
-                  "faster")
+    if sync_s >= 5.0:
+        print(f"            every wait below is rounded up to a whole SYNC, so "
+              f"setting syncIntervalMs to 1000 in "
+              f"{Path(server.config_file).name}\n            (and restarting "
+              "the server) takes a large bite out of that")
 
     with contextlib.ExitStack() as stack:
-        if tmp_config:
-            stack.callback(lambda: os.path.exists(tmp_config)
-                           and os.unlink(tmp_config))
         if args.use_running_server:
             if not server.is_running():
                 sys.exit("error: --use-running-server but no CanOpenOpcUa is "
                          f"running for {server.config_file}")
             print(f"  attached to the running server, pid {server.pid()}")
         else:
-            running = new_server(args.config_file).pid() or \
-                stale_scan_pid(server.binary)
-            if running:
-                sys.exit(f"error: a CanOpenOpcUa is already running for this "
-                         f"crate (pid {running}).\n       Attach to it with "
-                         "--use-running-server, or stop it first -- two "
-                         "CANopen\n       masters on one bus collide.")
+            # OpcUaServer.start() refuses if one is already running for this
+            # config file, which is what keeps two CANopen masters off the bus.
             stack.enter_context(server)
             if not server.wait_ready(timeout=args.start_timeout):
                 sys.exit("error: OPC-UA endpoint never opened -- check server.log")
@@ -1191,7 +1132,8 @@ def main():
             print(f"  [2/4] all branches OFF: wrote 0x{want_w:04X}, read back "
                   f"0x{got:04X}"
                   f"{'' if want_w == got else '   *** MISMATCH ***'}"
-                  f" -- rails {SETTLE_WORD[how]} after {secs:.0f}s, {ns} scans")
+                  f" -- rails {SETTLE_WORD[how]} after {secs:.0f}s"
+                  + (f", {ns} cache reads" if args.verbose else ""))
             if args.verbose:
                 print_measurement(data["off"], "all branches OFF", args)
                 n_up = sum(1 for b in range(16) for k in ("canv", "adv")
@@ -1210,7 +1152,8 @@ def main():
             print(f"  [3/4] all branches ON : wrote 0x{want_w:04X}, read back "
                   f"0x{got:04X}"
                   f"{'' if want_w == got else '   *** MISMATCH ***'}"
-                  f" -- rails {SETTLE_WORD[how]} after {secs:.0f}s, {ns} scans")
+                  f" -- rails {SETTLE_WORD[how]} after {secs:.0f}s"
+                  + (f", {ns} cache reads" if args.verbose else ""))
             if args.verbose:
                 print_measurement(data["on"], "all branches ON", args)
                 n_up = sum(1 for b in range(16) for k in ("canv", "adv")

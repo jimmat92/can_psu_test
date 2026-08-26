@@ -260,12 +260,12 @@ not just a switch test ([REFERENCE.md](REFERENCE.md) §4).
 **It power-cycles every branch.** Use `--skip-switch-test` if anything is
 plugged in that should not be.
 
-A default run is **~100 s**, and the ELMB's sweep is why: five repeat scans one
-sweep apart is 60 s of it. `-n 3` cuts that to ~35 s if you only want the
-occupancy and switching answers. The scan also runs its own server off a temp
-copy of the config with `syncIntervalMs` at 1000 ms (`--fast-sync 0` leaves it
-alone) — that does not speed up the sweep, but it does mean the waits are timed
-in seconds rather than in 10 s SYNC steps.
+A default run is **~150 s** with the shipped config, and the two waits it is
+made of are both real: the ELMB's sweep (five repeat scans one sweep apart is
+60 s) and `syncIntervalMs`, which rounds every wait up to a whole SYNC — 10 s
+each. Two levers: `-n 3` saves ~25 s, and setting `syncIntervalMs` to 1000 in
+`config/config-elmbpsu.xml` ([../config/README.md](../config/README.md)) saves
+~45 s. The sweep is the crate's own pace and cannot be shortened.
 
 `--json` gets the per-channel mean and variance, the three state measurements
 as engineering values, and every finding — not the raw samples.

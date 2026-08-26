@@ -262,8 +262,8 @@ Its claims about terminators, the separate control bus, floating outputs, and
 2. **Check the branch states** before and after: `elmbpsu-opcua status`, and
    `on all` if a previous session left branches off.
 3. **Drop `syncIntervalMs` to ~1000** in the config before chasing anything that
-   moves — at 10000 the sampling aliases a rail oscillation into nonsense.
-   `elmbpsu-cratescan` already does this for its own server run.
+   moves — at 10000 the sampling aliases a rail oscillation into nonsense, and
+   it rounds every wait `elmbpsu-cratescan` makes up to a whole 10 s SYNC.
 4. **Establish what the DO bit drives** — TRACO Remote On/Off versus a series
    switch. Needs a module in hand; not answerable from software (REFERENCE.md §4)
    and does not affect operation.

@@ -441,6 +441,10 @@ Everything `tests/crate_scan.py` waits for is built on that number
 
 Two consecutive reads agreeing proves nothing here — both can be stale — which
 is why the comparison is against a scan a full window old, not the previous one.
+Watching costs nothing: `TPDO3.chNN.value` is the server's own cache, so reading
+it repeatedly puts **no traffic on the CAN bus** (only `--source sdo` goes to
+the crate on request). The scan still reads it only about four times per window
+— the answer cannot change any faster than that.
 Rails still moving when the wait ends are tracked **per channel**, so one module
 bleeding down slowly does not make every other module's verdict unjudgeable, and
 a rail it could not judge is reported as unjudged rather than as a fault.
