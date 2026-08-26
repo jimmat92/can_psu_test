@@ -21,15 +21,10 @@ ELMB, write a **custom OPC-UA client** to replace WinCC OA, and produce a correc
 - `fwElmb/`, `fwElmbPSU/` and `CanOpenOpcUa/` are **reference material only** —
   reverse-engineer from them, never install or run them. Cite the source file for
   any protocol claim.
-- **The wider JCOP framework is not wanted here.** `fwInstallation-9.3.1/` and
-  `jcop-framework-9.3.0.1/` are not fetched, not ignored, and not to be added.
 - **Never take a CAN bus another user owns.** `can9` belongs to a production lab
   temperature monitor. Run `./tests/can_diag.py` before touching anything.
 - **Never run two CANopen masters on one bus.** While the OPC-UA server is up,
   only `scan` and `dump` are safe from `lib/elmbpsu_can.py`.
-- The user is hands-on with the hardware and wants **commands he can run**, not
-  theory: minimal text, 1–5 sentences per step followed by the command.
-- Be straight about what is verified against hardware versus simulated.
 
 ---
 
@@ -134,13 +129,6 @@ resulting plausibility limits are in REFERENCE.md §4. The consequence for
 diagnosis: **an implausible current reading is a module fault**, since no
 crate-side wiring is involved in producing that signal.
 
-### Per-slot findings are not recorded here
-
-Module positions have been changed since the first measurements, so any
-slot-by-slot occupancy or fault list in this file would be stale. **The crate
-itself has been checked and is not the suspect** — run `elmbpsu-cratescan` for
-the current picture rather than trusting a written-down one.
-
 ### `mon --source sdo` does not work on this crate
 
 The on-request analog reads at 0x2404 return `Bad` through the server (`aisdo_0`,
@@ -199,7 +187,5 @@ see them either.
   `kvaser_usb`, `gs_usb`, `usb_8dev`, `slcan`, `peak_canfd`. An **AnaGate** needs
   no kernel driver but is **not** reachable by `lib/elmbpsu_can.py` — it would
   need `provider="an"` in the server config.
-- The `vcan` module is **absent** (needs kernel-modules-extra), so a virtual-CAN
-  dry run is impossible. Use a free real port.
 
 ---

@@ -120,11 +120,6 @@ and probe every node id directly:
 elmbpsu-can --iface can13 scan
 ```
 
-**On this crate the scan returned node 57 (0x39), not the factory default 63** —
-which is why the server's first attempts showed `SW Version ?.?`. Scan again on
-a different crate. Still empty? Retry at 250000 and 50000 in step 2 before
-suspecting the wiring.
-
 **Do not run `elmbpsu-can` commands other than `scan` and `dump` while the
 server is running** — two CANopen masters on one node will confuse each other.
 
