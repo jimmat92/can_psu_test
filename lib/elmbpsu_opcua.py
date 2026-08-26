@@ -33,6 +33,7 @@ header of that file for where each fact comes from in the JCOP sources.
 import argparse
 import sys
 import time
+from collections import namedtuple
 
 try:
     from asyncua.sync import Client
@@ -43,9 +44,40 @@ except ImportError:
 
 NS_URI = "OPCUASERVER"
 
+# One analog-input reading: raw signed microvolts at the ADC input, whether the
+# read came back Good, and the server's SourceTimestamp -- which is how a caller
+# tells a fresh TPDO3 scan from the same cached one read twice (TPDO3 only
+# refreshes once per SYNC, i.e. every Bus/@syncIntervalMs).
+AiSample = namedtuple("AiSample", "channel uv ok timestamp")
+
 
 def branch_label(branch):
     return f"branch {branch:2d} (slot {branch // 2}, position {'AB'[branch % 2]})"
+
+
+def branch_channels(branch):
+    """The four ELMB analog inputs belonging to one branch, from
+    fwElmbPSU_createMonitorChannel(): ch = 4*b - 2*(b mod 2), then
+    CAN V = ch, AD V = ch+1, CAN I = ch+4, AD I = ch+5. Tiles all 64
+    inputs exactly once across the 16 branches (tests/selftest.py)."""
+    base = (branch * 4) - (2 * (branch % 2))
+    return {"canv": base, "adv": base + 1, "cani": base + 4, "adi": base + 5}
+
+
+def adc_volts(uv):
+    """Raw microvolts as they appear at the ADC input pin, in volts. This is
+    the number to reason about when deciding whether an input is *driven* at
+    all -- a current-sense line that nothing drives floats a few hundred mV,
+    which only looks like a huge negative current after conversion."""
+    return uv / 1e6
+
+
+def to_volts(uv):
+    return uv / 1e6 * 100.0          # 100:1 divider on the module
+
+
+def to_amps(uv):
+    return (uv / 1e6 - 2.5) * 5.0 / 0.625   # 2.5 V-centred sensor, 8 A/V
 
 
 def parse_branches(spec):
@@ -101,6 +133,28 @@ class PsuCrate:
             return self.read(f"aisdo.aisdo_{channel}")
         return self.read(f"TPDO3.ch{channel}.value")
 
+    def ai_nodes(self, source="tpdo"):
+        """The 64 analog-input nodes in channel order. Build the list once and
+        hand it to read_ai_all() -- constructing the node objects per read
+        costs more than the read does."""
+        if source == "sdo":
+            return [self.node_at(f"aisdo.aisdo_{c}") for c in range(64)]
+        return [self.node_at(f"TPDO3.ch{c}.value") for c in range(64)]
+
+    def read_ai_all(self, source="tpdo", nodes=None):
+        """Read all 64 analog inputs in ONE OPC-UA call. Sixty-four separate
+        reads would be sixty-four round trips and would not be a coherent
+        snapshot. A bad channel comes back as AiSample(ok=False) rather than
+        raising, so one dead channel cannot lose the other sixty-three."""
+        if nodes is None:
+            nodes = self.ai_nodes(source)
+        out = []
+        for ch, dv in enumerate(self.client.read_attributes(nodes)):
+            ok = dv.StatusCode is None or dv.StatusCode.is_good()
+            uv = dv.Value.Value if (ok and dv.Value is not None) else None
+            out.append(AiSample(ch, uv, ok and uv is not None, dv.SourceTimestamp))
+        return out
+
     def ping(self):
         """Round-trip through the address space config.xml built, not raw
         CANopen: read stateAsText, the cheapest node every crate config
@@ -111,6 +165,32 @@ class PsuCrate:
             return True, self.state()
         except Exception as exc:
             return False, str(exc)
+
+    def wait_ready(self, timeout=30.0, poll=0.5):
+        """Block until the crate is answering, which is later than the server
+        endpoint opening. Returns (ok, state_or_error).
+
+        A freshly started server answers every read with
+        BadWaitingForInitialData until it has actually fetched that value from
+        the ELMB -- the address space exists immediately, the data does not.
+        stateAsText comes from the node guard, and Bus/@nodeGuardIntervalMs is
+        10 s in our config, so "endpoint open" can precede "crate answering"
+        by that much. OpcUaServer.wait_ready() only gets you the former."""
+        deadline = time.monotonic() + timeout
+        last = f"still BadWaitingForInitialData after {timeout}s"
+        while True:
+            try:
+                return True, self.state()
+            except Exception as exc:
+                last = f"{type(exc).__name__}: {exc}"
+                # A node id that does not exist will never start existing.
+                # That is a --bus/--node or config-file mistake, not warm-up,
+                # so fail now instead of sitting out the whole timeout.
+                if "BadNodeId" in type(exc).__name__:
+                    return False, last
+            if time.monotonic() >= deadline:
+                return False, last
+            time.sleep(poll)
 
 
 def show_branches(word, on_value):
@@ -215,13 +295,13 @@ def cmd_mon(crate, args):
     print(f"source: {args.source}")
     print(f"{'branch':>6} {'CAN V':>9} {'CAN I':>10} {'AD V':>9} {'AD I':>10}")
     for b in branches:
-        base = (b * 4) - (2 * (b % 2))
+        ch = branch_channels(b)
         cells = []
-        for channel, is_volt in ((base, True), (base + 4, False),
-                                 (base + 1, True), (base + 5, False)):
+        for key, is_volt in (("canv", True), ("cani", False),
+                             ("adv", True), ("adi", False)):
             try:
-                volts = crate.ai_uv(channel, args.source) / 1e6
-                val = volts * 100.0 if is_volt else (volts - 2.5) * 5.0 / 0.625
+                uv = crate.ai_uv(ch[key], args.source)
+                val = to_volts(uv) if is_volt else to_amps(uv)
                 cells.append(f"{val:8.3f}{'V' if is_volt else 'A'}")
             except Exception:
                 cells.append("     n/a ")

@@ -59,6 +59,7 @@ OUR_FILES=(
   "lib/elmbpsu_server.py"
   "tests/selftest.py"
   "tests/smoke_test.py"
+  "tests/crate_scan.py"
   "config/config-elmbpsu.xml"
   "config/ServerConfig-elmbpsu.xml"
 )
@@ -244,7 +245,8 @@ WRAP
   wrapper can-diag      tests/can_diag.py
   wrapper elmbpsu-selftest tests/selftest.py
   wrapper elmbpsu-smoketest tests/smoke_test.py
-  ok "elmbpsu-can, elmbpsu-opcua, elmbpsu-server, can-diag, elmbpsu-selftest, elmbpsu-smoketest on PATH once activated"
+  wrapper elmbpsu-cratescan tests/crate_scan.py
+  ok "elmbpsu-can, elmbpsu-opcua, elmbpsu-server, can-diag, elmbpsu-selftest, elmbpsu-smoketest, elmbpsu-cratescan on PATH once activated"
 
   # --- repo paths as environment variables ---------------------------------
   if ! grep -q '# >>> can_psu_test >>>' "$VENV/bin/activate" 2>/dev/null; then
@@ -334,7 +336,7 @@ verify() {
       fail "$x is not well-formed"; rc=1
     fi
   done
-  for s in tests/can_diag.py lib/elmbpsu_can.py lib/elmbpsu_opcua.py lib/elmbpsu_server.py tests/smoke_test.py; do
+  for s in tests/can_diag.py lib/elmbpsu_can.py lib/elmbpsu_opcua.py lib/elmbpsu_server.py tests/smoke_test.py tests/crate_scan.py; do
     if python3 -c "import ast; ast.parse(open('$SCRIPT_DIR/$s').read())" 2>/dev/null; then
       ok "$s parses"
     else

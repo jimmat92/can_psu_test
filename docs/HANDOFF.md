@@ -55,7 +55,8 @@ can_psu_test/                         the git repo and working directory
 ├── tests/
 │   ├── can_diag.py                   read-only pre-flight (stdlib only)
 │   ├── selftest.py                   offline verification, 27 checks
-│   └── smoke_test.py                 start server, scan bus, ping, stop server
+│   ├── smoke_test.py                 start server, scan bus, ping, stop server
+│   └── crate_scan.py                 full sweep: occupancy, switching, sensors
 ├── docs/
 │   ├── QUICKSTART.md                 operator procedure
 │   ├── REFERENCE.md                  protocol, mappings, server behaviour

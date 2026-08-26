@@ -236,6 +236,43 @@ is switch power off → `delay(1)` → switch power on, and is the official way 
 cold-boot ELMBs sitting on a branch. CERN treats this as real removal of power
 and as a routine operation.
 
+### Which side of the connector the sensors are on
+
+**The current sensors and their 2.5 V references are on the MODULE, not on the
+crate backplane.** This decides how every faulty reading is read, so it is worth
+the three lines of argument. From the two measurements above:
+
+1. With a module removed, all four of that slot's current-sense channels float
+   at 0.17–0.41 V, no two alike — the signature of a high-impedance ADC input
+   that nothing is driving.
+2. With the module in but its branch switched **off**, the same channels sit
+   parked at 2.5 V.
+
+A sensor living on the crate side would be fed from crate housekeeping power and
+would hold its 2.5 V reference in *both* cases, reading zero current into an
+empty slot. It does not. So the thing generating that signal leaves with the
+module, and the analog line crosses the module-to-backplane connector. The ELMB
+and its ADC are of course in the crate; only the sensing is not.
+
+Strictly, this proves the *source* of the signal is on the module side of the
+connector, not which PCB the sensor chip is soldered to — a backplane sensor
+powered solely through a module-supplied rail would look identical. That is a
+contrived design and nothing suggests it, but it has not been ruled out.
+
+The reading rules that follow, per slot (a module spans branches 2s and 2s+1):
+
+| what the slot's four current channels do | means |
+|---|---|
+| all four float, all four voltages ~0 | **no module**, or one making no contact at all |
+| **some** float, others hold 2.5 V | module is there and partly working, so this is a **contact** problem — reseat it, then re-run |
+| all four hold 2.5 V, a rail stays down | contact is fine; the fault is the module's **converter or output stage** |
+
+A partial pattern can never be a dead module: a dead module could not produce
+the good channels. To separate a bad module from a bad slot after reseating,
+move that module to a slot this scan called healthy — the fault following the
+module means the module, staying with the slot means the crate backplane.
+`tests/crate_scan.py` applies exactly this ladder.
+
 **Not established, and not establishable from software:** whether the DO line
 drives the TRACO converter's Remote On/Off (inhibit) pin or a series switch in
 its output. Inhibit is much the more likely — it is a standard TRACO control
@@ -369,6 +406,23 @@ for `--method rpdo`, so the cache is overwritten wholesale and cannot diverge
 from intent. The `branchNN` nodes stay in the address space for clients that
 track their own state. `lib/elmbpsu_can.py` was never affected — it builds the
 word itself and transmits its own RPDO.
+
+### The endpoint opening is not the crate answering
+
+A freshly started server publishes its whole address space immediately but has
+no *data* in it. Every read returns **`BadWaitingForInitialData`** until the
+server has fetched that particular value from the ELMB once. For `stateAsText`
+that means waiting on a node-guard cycle — `Bus/@nodeGuardIntervalMs`, 10 s
+here — and for the `TPDO3.chNN.value` nodes it means waiting for the first SYNC,
+`Bus/@syncIntervalMs`, also 10 s. So `Opened endpoint` in the log can precede a
+usable read by ten seconds or more.
+
+Hit for real on 2026-08-26: `tests/crate_scan.py` read `stateAsText` as soon as
+`OpcUaServer.wait_ready()` returned and died with `BadWaitingForInitialData`.
+`OpcUaServer.wait_ready()` only proves the endpoint is up; `PsuCrate.wait_ready()`
+polls until the crate itself answers, and is what a client should use before its
+first read. `tests/smoke_test.py` had been getting away with it only because its
+bus scan happens to take a few seconds first.
 
 ### Other quasar / CanOpenOpcUa behaviour worth knowing
 

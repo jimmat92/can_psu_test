@@ -131,17 +131,22 @@ id, or the privilege failure above.
 with `pgrep -f`, and can stop it with a clean SIGTERM.
 
 ```bash
-elmbpsu-server start --wait-port     # blocks until the OPC-UA port is listening
+elmbpsu-server start --wait-ready    # blocks until the endpoint opens
 elmbpsu-server status
 elmbpsu-server stop
 ```
+
+`--wait-ready` watches `server.log` for `Opened endpoint`. It does not TCP-probe
+the port: the endpoint URL substitutes `[NodeName]` with the **hostname**, which
+does not necessarily resolve to `127.0.0.1`, so probing loopback can spin for the
+whole timeout while the server is up and healthy.
 
 Or from a test script, as a context manager:
 
 ```python
 from elmbpsu_server import OpcUaServer
 with OpcUaServer() as server:            # start() on entry, stop() on exit
-    server.wait_for_port()
+    server.wait_ready()
     ...                                   # drive elmbpsu_opcua.PsuCrate here
 ```
 
@@ -249,6 +254,45 @@ the server on the way out -- success, a failed check, Ctrl-C, or any error.
 ```bash
 elmbpsu-smoketest
 ```
+
+### Full crate scan
+
+Once the smoke test passes, `tests/crate_scan.py` characterises the crate itself.
+It measures all 64 analog inputs as found, switches every branch off and measures
+again, switches every branch on and measures again, then repeats the measurement
+N times for a mean and variance per channel.
+
+```bash
+elmbpsu-cratescan                       # 5 repeats, starts and stops the server
+elmbpsu-cratescan -n 20 --json scan.json
+elmbpsu-cratescan --skip-switch-test    # read-only: switches nothing
+elmbpsu-cratescan --use-running-server  # attach to a server that is already up
+```
+
+From that it reports **per slot, not per branch** — a module spans branches
+`2*slot` and `2*slot+1`, so a fault on either one condemns that one module:
+
+- which slots hold a module, and which are empty;
+- whether on/off works, split into the command path (DO read-back) and the
+  physical response (the rail actually going down and back up);
+- whether each sensor reports something plausible *and* reports it steadily.
+  Both halves matter: a sense line that nothing drives sits rock steady at a few
+  hundred mV, so a stdev test on its own would pass it.
+
+Exit status is 0 only if nothing was found. It ends with a `SUSPECT MODULES`
+line: the slots to pull.
+
+Presence is decided from the **current** inputs, not the voltage inputs. A
+voltage input reads ~0 whether the branch is off or the slot is empty, but a
+current input is held at 2.5 V by a reference the module powers itself — so it
+keeps sitting at 2.5 V with the branch switched off, and floats only when there
+is no module. That is why the all-off step is a measurement and not just a
+switch test ([REFERENCE.md](REFERENCE.md) §4).
+
+**It power-cycles every branch.** Use `--skip-switch-test` if anything is
+plugged in that should not be. Also note `Bus/@syncIntervalMs` is 10000, and
+TPDO3 refreshes only once per SYNC — so each of the ~8 scans costs 10 s. Drop it
+to 1000 in `config/config-elmbpsu.xml` and the run gets about ten times faster.
 
 ---
 

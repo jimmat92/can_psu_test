@@ -61,6 +61,9 @@ def main():
     p.add_argument("--no-sudo", action="store_true",
                    help="use if the binary already has CAP_NET_ADMIN (setcap)")
     p.add_argument("--start-timeout", type=float, default=15.0)
+    p.add_argument("--warmup", type=float, default=30.0,
+                   help="how long to let the server fetch stateAsText from the "
+                        "ELMB before calling the ping failed")
     args = p.parse_args()
 
     server = OpcUaServer(config_file=args.config_file,
@@ -94,7 +97,11 @@ def main():
             except Exception:
                 ns = 2
             crate = PsuCrate(client, ns, args.bus, args.node)
-            ok, result = crate.ping()
+            # Not a plain ping(): the server answers BadWaitingForInitialData
+            # until it has read stateAsText from the ELMB once, and that waits
+            # on a node-guard cycle (10 s in our config). The bus scan above
+            # usually covers it, but only by accident.
+            ok, result = crate.wait_ready(timeout=args.warmup)
         finally:
             client.disconnect()
         if not ok:
