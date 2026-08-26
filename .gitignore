@@ -5,10 +5,6 @@
 /fwElmb/
 /fwElmbPSU/
 
-# Optional trees, not required by anything here (see docs/HANDOFF.md).
-/fwInstallation-*/
-/jcop-framework-*/
-
 # --- python ----------------------------------------------------------------
 __pycache__/
 *.py[cod]

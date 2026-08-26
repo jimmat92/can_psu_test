@@ -53,7 +53,7 @@ REQUIRED_FILES=(
 
 # our own files, relative to the repo root
 OUR_FILES=(
-  "can_diag.py"
+  "tests/can_diag.py"
   "lib/elmbpsu_can.py"
   "lib/elmbpsu_opcua.py"
   "tests/selftest.py"
@@ -80,7 +80,7 @@ Usage: ./setup.sh [options]
   --submodules     also init CanOpenOpcUa's submodules (CanModuleMain, LogIt).
                    Required only if you intend to BUILD the OPC-UA server.
   --no-venv        skip creating .venv. Only elmbpsu_opcua.py needs it;
-                   can_diag.py and elmbpsu_can.py are standard library only.
+                   tests/can_diag.py and lib/elmbpsu_can.py are stdlib only.
   --python PATH    interpreter to build the venv with (default: the newest
                    python3.X found on PATH).
   --check          verify an existing workspace, clone nothing, build nothing.
@@ -123,10 +123,6 @@ write_gitignore() {
 /CanOpenOpcUa/
 /fwElmb/
 /fwElmbPSU/
-
-# Optional trees, not required by anything here (see docs/HANDOFF.md).
-/fwInstallation-*/
-/jcop-framework-*/
 
 # --- python ----------------------------------------------------------------
 __pycache__/
@@ -242,7 +238,7 @@ WRAP
   }
   wrapper elmbpsu-can   lib/elmbpsu_can.py
   wrapper elmbpsu-opcua lib/elmbpsu_opcua.py
-  wrapper can-diag      can_diag.py
+  wrapper can-diag      tests/can_diag.py
   wrapper elmbpsu-selftest tests/selftest.py
   ok "elmbpsu-can, elmbpsu-opcua, can-diag, elmbpsu-selftest on PATH once activated"
 
@@ -310,16 +306,22 @@ verify() {
   done
   if ls /sys/class/net | grep -q '^can\|^vcan'; then
     ok "CAN interface present: $(ls /sys/class/net | grep '^can\|^vcan' | tr '\n' ' ')"
-    info "Which of them are free: ./can_diag.py"
+    info "Which of them are free: ./tests/can_diag.py"
   else
     warn "no CAN interface - see docs/HANDOFF.md before testing hardware"
   fi
 
   info "Verifying our own tools"
-  if python3 "$SCRIPT_DIR/tests/selftest.py" >/dev/null 2>&1; then
-    ok "tests/selftest.py passes"
+  # selftest.py imports elmbpsu_can by name; the venv .pth is what makes that
+  # resolve, so it has to run under the venv interpreter.
+  if [[ -x "$VENV/bin/python" ]]; then
+    if "$VENV/bin/python" "$SCRIPT_DIR/tests/selftest.py" >/dev/null 2>&1; then
+      ok "tests/selftest.py passes"
+    else
+      fail "tests/selftest.py FAILED - run elmbpsu-selftest to see why"; rc=1
+    fi
   else
-    fail "tests/selftest.py FAILED - run it directly to see why"; rc=1
+    warn "tests/selftest.py skipped - it needs the venv (drop --no-venv)"
   fi
   for x in config/config-elmbpsu.xml config/ServerConfig-elmbpsu.xml; do
     if python3 -c "import xml.dom.minidom as m; m.parse('$SCRIPT_DIR/$x')" 2>/dev/null; then
@@ -328,7 +330,7 @@ verify() {
       fail "$x is not well-formed"; rc=1
     fi
   done
-  for s in can_diag.py lib/elmbpsu_can.py lib/elmbpsu_opcua.py; do
+  for s in tests/can_diag.py lib/elmbpsu_can.py lib/elmbpsu_opcua.py; do
     if python3 -c "import ast; ast.parse(open('$SCRIPT_DIR/$s').read())" 2>/dev/null; then
       ok "$s parses"
     else

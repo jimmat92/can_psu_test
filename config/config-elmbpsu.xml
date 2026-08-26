@@ -20,7 +20,7 @@
   Endpoint: opc.tcp://<host>:48012  (anonymous, security None)
 
   ADJUST BEFORE USE:
-    Bus/@port      - currently "can13". Pick a port ./can_diag.py reports as
+    Bus/@port      - currently "can13". Pick a port ./tests/can_diag.py reports as
                      FREE; this is a shared machine and can9 belongs to the lab
                      temperature monitor. For AnaGate set provider="an" and port
                      to the AnaGate address form your CanModule wants.

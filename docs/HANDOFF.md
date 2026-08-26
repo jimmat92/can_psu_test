@@ -25,10 +25,11 @@ Standing constraints:
 - `fwElmb/`, `fwElmbPSU/` and `CanOpenOpcUa/` are **reference material only** —
   reverse-engineer from them, never install or run them. Cite the source file
   for any protocol claim.
-- `fwInstallation-9.3.1/` and `jcop-framework-9.3.0.1/` are **off-limits** unless
-  out of options. They have never been needed and are not fetched by `setup.sh`.
+- **The wider JCOP framework is not wanted here.** `fwInstallation-9.3.1/` and
+  `jcop-framework-9.3.0.1/` are not fetched, not ignored, and not to be added.
+  Nothing in this project has ever needed them.
 - **Never take a CAN bus another user owns.** `can9` belongs to a production lab
-  temperature monitor. Run `./can_diag.py` before touching anything.
+  temperature monitor. Run `./tests/can_diag.py` before touching anything.
 - **Never run two CANopen masters on one bus.** While the OPC-UA server is up,
   only `scan` and `dump` are safe from `lib/elmbpsu_can.py`.
 - The user is hands-on with the hardware and wants **commands he can run**, not
@@ -42,7 +43,6 @@ Standing constraints:
 ```
 can_psu_test/                         the git repo and working directory
 ├── setup.sh                          restores the workspace: refs, venv, checks
-├── can_diag.py                       read-only pre-flight (stdlib only)
 ├── README.md                         the full write-up
 ├── config/
 │   ├── README.md                     which parameters to change
@@ -52,6 +52,7 @@ can_psu_test/                         the git repo and working directory
 │   ├── elmbpsu_can.py                SocketCAN tool, zero dependencies
 │   └── elmbpsu_opcua.py              OPC-UA client (the WinCC OA replacement)
 ├── tests/
+│   ├── can_diag.py                   read-only pre-flight (stdlib only)
 │   └── selftest.py                   offline verification, 27 checks
 ├── docs/
 │   ├── QUICKSTART.md                 operator procedure
@@ -100,7 +101,7 @@ separate fetch — an identical copy ships inside `fwElmbPSU/source/`.
 | `lib/elmbpsu_can.py` | written, self-tested; `dump` verified on real hardware |
 | `lib/elmbpsu_opcua.py` | **verified end-to-end against the real crate** on 2026-08-25 |
 | `config/config-elmbpsu.xml` | **verified against the real crate** — server comes up, node table populates |
-| `can_diag.py` | verified both ways: detected a live server, correctly rejected sshd/cups/postfix |
+| `tests/can_diag.py` | verified both ways: detected a live server, correctly rejected sshd/cups/postfix |
 | the crate | answers, switches, and reports 11.8–12.8 V on ten of sixteen branches |
 
 ---
@@ -218,7 +219,7 @@ fallback for a crate whose `aiTransmissionType` is not 1.
 ## 5. This machine (`pcaticstest08`, 2026-08-25)
 
 **Shared.** Other users (`jsouter`, `kapoplaw`, `nkanello`) run WinCC OA projects
-and CanOpenOpcUa here. Re-check with `./can_diag.py` rather than trusting this
+and CanOpenOpcUa here. Re-check with `./tests/can_diag.py` rather than trusting this
 snapshot.
 
 ```
@@ -246,7 +247,7 @@ to the CanOpenOpcUa binary), running as root since 10 July 2026, serving
 CanOpenOpcUa's own default — was free, and is what we use.
 
 There is also one named network namespace (`netns-2ad82ea7-...`); CAN devices and
-ports inside it are invisible from the host namespace, so `can_diag.py` cannot
+ports inside it are invisible from the host namespace, so `tests/can_diag.py` cannot
 see them either.
 
 Other environment facts:
@@ -328,7 +329,5 @@ Its claims about terminators, the separate control bus, floating outputs, and
    recoverable from anything in this workspace.
 6. **Establish what the DO bit drives** — TRACO Remote On/Off versus a series
    switch. Needs a module in hand; not answerable from software (REFERENCE.md §4).
-7. `fwInstallation-9.3.1/` and `jcop-framework-9.3.0.1/` have never been
-   examined and have never been needed.
-8. The user has been offered the README as a shareable Artifact page and has not
+7. The user has been offered the README as a shareable Artifact page and has not
    asked for it.

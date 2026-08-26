@@ -908,17 +908,17 @@ def report_usage(args, ifaces, receivers, hints, opcua=None):
         print("  which is 63 only on a factory-default crate):")
         print()
         if rec["up"] and rec["bitrate"] == 125000:
-            print("    ./lib/elmbpsu_can.py --iface %s scan" % pick)
+            print("    elmbpsu-can --iface %s scan" % pick)
         else:
             print("    sudo ip link set %s down" % pick)
             print("    sudo ip link set %s type can bitrate 125000" % pick)
             print("    sudo ip link set %s up" % pick)
-            print("    ./lib/elmbpsu_can.py --iface %s scan" % pick)
+            print("    elmbpsu-can --iface %s scan" % pick)
         print()
         print("  Then set Bus/@port in config/config-elmbpsu.xml to \"%s\"." % pick)
     if busy:
         print()
-        print("  Do not run lib/elmbpsu_can.py against %s: a second CANopen master on a"
+        print("  Do not run elmbpsu-can against %s: a second CANopen master on a"
               % busy[0])
         print("  bus that already has one will collide on SDO transfers and can")
         print("  switch branches out from under the other operator.")

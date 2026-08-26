@@ -18,10 +18,10 @@ Everything was reverse-engineered from `ElmbPsuIntroduction.pdf`, `fwElmbPSU/`,
 
 ```
 setup.sh                  restores the workspace: reference repos, venv, checks
-can_diag.py               read-only pre-flight: OPC-UA servers, CAN ports, who owns what
 config/                   the two CanOpenOpcUa XML files + what to change in them
 lib/elmbpsu_can.py        SocketCAN control/diagnosis tool, zero dependencies
 lib/elmbpsu_opcua.py      OPC-UA client — the fwElmbPSU replacement
+tests/can_diag.py         read-only pre-flight: OPC-UA servers, CAN ports, who owns what
 tests/selftest.py         offline verification against a simulated ELMB, 27 checks
 docs/                     QUICKSTART, REFERENCE, HANDOFF
 ```
@@ -45,14 +45,15 @@ puts the tools on `PATH`:
 
 | activated command | is |
 |---|---|
-| `can-diag` | `can_diag.py` |
+| `can-diag` | `tests/can_diag.py` |
 | `elmbpsu-can` | `lib/elmbpsu_can.py` |
 | `elmbpsu-opcua` | `lib/elmbpsu_opcua.py` |
 | `elmbpsu-selftest` | `tests/selftest.py` |
 
-Without the venv, run the scripts by path — `./can_diag.py`,
-`./lib/elmbpsu_can.py`. Both of those are standard library only and need
-nothing installed; only `elmbpsu_opcua.py` requires `asyncua`.
+`tests/can_diag.py` and `lib/elmbpsu_can.py` are standard library only, so they
+also run by path with no venv — `./tests/can_diag.py`, `./lib/elmbpsu_can.py`.
+`elmbpsu_opcua.py` needs `asyncua`, and `tests/selftest.py` imports
+`elmbpsu_can` by name, so both of those want the venv active.
 
 Useful flags: `--check` verifies an existing workspace without building,
 `--no-venv` skips the venv, `--dest ..` puts the reference repos beside the repo
@@ -67,7 +68,7 @@ CANopen master is not yours to take. Run this first — it is read-only, it
 configures no link and transmits no CAN frame:
 
 ```bash
-./can_diag.py
+./tests/can_diag.py
 ```
 
 Three sections:
@@ -138,7 +139,7 @@ elmbpsu-can --iface can13 --node 57 on all
 elmbpsu-can --iface can13 --node 57 off all
 ```
 
-**Never point this at a bus `can_diag.py` reported as IN USE.** Two CANopen
+**Never point this at a bus `can-diag` reported as IN USE.** Two CANopen
 masters on one bus collide on SDO transfers, and you would be switching branches
 out from under whoever else is on it.
 

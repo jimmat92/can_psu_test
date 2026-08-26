@@ -1,7 +1,7 @@
 # Configuration
 
 Two files, both read by `CanOpenOpcUa` at startup. Neither is read by
-`can_diag.py` or by the tools in [../lib/](../lib/) — those take everything on
+`tests/can_diag.py` or by the tools in [../lib/](../lib/) — those take everything on
 the command line.
 
 ```bash
@@ -25,13 +25,13 @@ to get wrong.
 
 | where | attribute | current | change it when |
 |-------|-----------|---------|----------------|
-| `<Bus>` | `port` | `can13` | you use a different CAN interface. Pick one `../can_diag.py` reports as FREE. |
+| `<Bus>` | `port` | `can13` | you use a different CAN interface. Pick one `../tests/can_diag.py` reports as FREE. |
 | `<Bus>` | `settings` | `125k` | the crate is not at the 125 kbit/s ELMB PSU default. Must be a real bitrate — see the warning below. |
 | `<Node>` | `id` | `57` | you move to a different crate. **Confirm with a bus scan, never assume.** 63 is only the factory default; this crate is not on it. |
 | `<Bus>` | `syncIntervalMs` | `10000` | you want faster analog sampling. TPDO3 delivers one full 64-channel scan per SYNC, so this is the `mon --source tpdo` refresh period. Drop to ~1000 to watch a fast-changing rail. |
 
 ```bash
-../can_diag.py                                  # which port is free
+../tests/can_diag.py                            # which port is free
 ../lib/elmbpsu_can.py --iface can13 scan        # which node id answers
 ```
 
@@ -61,7 +61,7 @@ A copy of `/opt/labTempMonitor/bin/ServerConfig.xml` with **one line changed**:
 
 | what | value | change it when |
 |------|-------|----------------|
-| `<Url>` port | `48012` | 48012 is taken. 33815 is **not** an option — the lab temperature monitor has held it since July. Check with `../can_diag.py`. |
+| `<Url>` port | `48012` | 48012 is taken. 33815 is **not** an option — the lab temperature monitor has held it since July. Check with `../tests/can_diag.py`. |
 
 `[NodeName]` is a placeholder the server substitutes with the host name.
 Everything else is stock and needs no attention: security policy `None`,

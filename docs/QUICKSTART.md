@@ -23,10 +23,10 @@ new terminal.
 
 This is a shared machine. Someone else's CanOpenOpcUa server or WinCC OA project
 may already own a bus, and a second CANopen master on it will collide with
-theirs. `can_diag.py` is read-only — it configures nothing and transmits nothing.
+theirs. `tests/can_diag.py` is read-only — it configures nothing and transmits nothing.
 
 ```bash
-./can_diag.py
+./tests/can_diag.py
 ```
 
 Take an interface from the `FREE` line of its verdict. Everything below writes it
