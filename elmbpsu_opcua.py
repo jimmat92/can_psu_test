@@ -145,10 +145,22 @@ def cmd_switch(crate, args, turn_on):
           f"{', '.join(str(b) for b in branches)}")
     print(f"  DO word 0x{before:04X} -> 0x{want:04X}   (method: {args.method})")
 
-    for b in branches:
-        if args.method == "rpdo":
-            crate.write_branch(b, level)
-        else:
+    if args.method == "rpdo":
+        # Write the whole 16-bit word, not the per-branch Boolean nodes.
+        #
+        # RPDO1.branchNN is a quasar RpdoCachedVariable: writing it read-modify-
+        # writes the *server's* 8-byte RPDO shadow cache and transmits all of it
+        # (Device/src/DRpdoCachedVariable.cpp writeValue -> propagateCache). That
+        # cache starts at all zeros (DRpdo.cpp m_cache.assign(8, 0)) and knows
+        # nothing about the state the ELMB powered up in from doInitHigh (0x2300).
+        # So on a freshly started server the first per-branch write transmits the
+        # cache, not the intended word, and silently switches every other branch
+        # off. Writing do_write overwrites the cache wholesale, so intent and
+        # cache always agree. The branchNN nodes remain in the address space for
+        # other clients that keep their own state.
+        crate.write_word(want)
+    else:
+        for b in branches:
             crate.write_branch_sdo(b, level)
 
     time.sleep(args.settle)
@@ -156,6 +168,9 @@ def cmd_switch(crate, args, turn_on):
     print(f"  read back    0x{after:04X}")
     if after != want:
         print("  *** READ-BACK MISMATCH ***  see the troubleshooting notes in README.md")
+        if args.method == "sdo" and before != 0 and after == 0:
+            print("  (all bits cleared: the server's RPDO cache was stale. It is "
+                  "now in sync;\n   re-issue the command, or use --method rpdo.)")
         return 1
     print("  read-back OK")
     show_branches(after, on_value)
@@ -237,8 +252,12 @@ def main():
 
     s = sub.add_parser("mon", help="branch voltages and currents")
     s.add_argument("--branches", default="all")
-    s.add_argument("--source", choices=["sdo", "tpdo"], default="sdo",
-                   help="sdo = on-request 0x2404; tpdo = SYNC-driven TPDO3 cache")
+    # tpdo is the default because the on-request 0x2404 reads return Bad on the
+    # crate this was commissioned against (ELMB sw "MA43"), while the SYNC-driven
+    # TPDO3 scan works. Keep sdo available: it needs no SYNC and is the fallback
+    # if a crate has aiTransmissionType != 1.
+    s.add_argument("--source", choices=["tpdo", "sdo"], default="tpdo",
+                   help="tpdo = SYNC-driven TPDO3 cache (default); sdo = on-request 0x2404")
 
     s = sub.add_parser("browse", help="dump the server address space")
     s.add_argument("--depth", type=int, default=3)
