@@ -979,23 +979,23 @@ def main():
     g = p.add_argument_group("pass/fail thresholds")
     g.add_argument("--v-nominal", type=float, default=12.0,
                    help="expected rail voltage (default 12.0)")
-    g.add_argument("--v-tol", type=float, default=2.0,
+    g.add_argument("--v-tol", type=float, default=0.9,
                    help="a commanded-on rail further than this from --v-nominal "
-                        "is an abnormal output (default 2.0 V)")
+                        "is an abnormal output (default 0.9 V)")
     g.add_argument("--v-on-min", type=float, default=None,
                    help="rail volts at or above this are a healthy rail "
                         "(default: --v-nominal minus --v-tol)")
-    g.add_argument("--v-off-max", type=float, default=1.0,
+    g.add_argument("--v-off-max", type=float, default=0.5,
                    help="rail volts at or below this count as OFF; anything "
-                        "above it has switched on, healthy or not (default 1.0)")
-    g.add_argument("--i-zero-tol", type=float, default=0.25,
+                        "above it has switched on, healthy or not (default 0.5)")
+    g.add_argument("--i-zero-tol", type=float, default=0.1,
                    help="volts at the ADC pin either side of the sensor's 2.5 V "
-                        "zero still counted as 'sensor alive' (default 0.25, "
-                        "i.e. +/-2 A). Assumes nothing is drawing real current.")
-    g.add_argument("--v-stdev-max", type=float, default=0.05,
-                   help="stability limit for voltage channels (default 0.05 V)")
-    g.add_argument("--i-stdev-max", type=float, default=0.05,
-                   help="stability limit for current channels (default 0.05 A)")
+                        "zero still counted as 'sensor alive' (default 0.1, "
+                        "i.e. +/-0.8 A). Assumes nothing is drawing real current.")
+    g.add_argument("--v-stdev-max", type=float, default=0.03,
+                   help="stability limit for voltage channels (default 0.03 V)")
+    g.add_argument("--i-stdev-max", type=float, default=0.03,
+                   help="stability limit for current channels (default 0.03 A)")
 
     g = p.add_argument_group("server and endpoint")
     g.add_argument("--use-running-server", action="store_true",
