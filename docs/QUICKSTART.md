@@ -220,6 +220,12 @@ a fault it names is a **module** fault: the divider and the transducer are both
 in the module, so the crate is not in the signal path
 ([REFERENCE.md](REFERENCE.md) §4).
 
+A slot counts as populated only on evidence that survives a second look: a rail
+that actually came up, or two sense lines holding the transducer's 2.5 V zero
+across the repeat scans. A single current input near that zero is not enough —
+an undriven input is high impedance and can drift into the band. Where one did,
+the report says so on a `!` line rather than leaving the slot silently empty.
+
 **It power-cycles every branch**, and takes ~150 s — it waits out the ELMB's own
 sampling sweep after each switch ([REFERENCE.md](REFERENCE.md) §6). `--help` has
 the read-only mode, the thresholds and the rest.

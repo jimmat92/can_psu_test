@@ -23,7 +23,7 @@ lib/elmbpsu_can.py        SocketCAN control/diagnosis tool, zero dependencies
 lib/elmbpsu_opcua.py      OPC-UA client — the fwElmbPSU replacement
 lib/elmbpsu_server.py     start/stop the CanOpenOpcUa server itself
 tests/can_diag.py         read-only pre-flight: OPC-UA servers, CAN ports, who owns what
-tests/selftest.py         offline verification against a simulated ELMB, 27 checks
+tests/selftest.py         offline verification against a simulated ELMB, 37 checks
 tests/smoke_test.py       start server, scan bus, ping, stop server
 tests/crate_scan.py       full sweep: occupancy, switching, sensor health
 docs/                     QUICKSTART, REFERENCE, HANDOFF
@@ -220,6 +220,11 @@ makes it read-only. See [docs/QUICKSTART.md](docs/QUICKSTART.md).
 
 An implausible **current** reading is a module fault, not a crate one — the
 transducer is inside the module ([docs/REFERENCE.md](docs/REFERENCE.md) §4).
+
+If `elmbpsu-cratescan` names a module in a slot you know is **empty**, check its
+`!` notes: an undriven current input can drift into the transducer's 2.5 V band
+and look like one. The scan discounts a reading that will not hold that level
+and says so ([docs/REFERENCE.md](docs/REFERENCE.md) §4).
 
 ## 7. Making the crate come up powered
 

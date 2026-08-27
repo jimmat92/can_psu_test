@@ -36,12 +36,12 @@ ELMB, write a **custom OPC-UA client** to replace WinCC OA, and produce a correc
 
 | | state |
 |---|---|
-| protocol, mappings, conversions | **verified** — against the JCOP sources, `tests/selftest.py` (27 checks), and against the crate |
+| protocol, mappings, conversions | **verified** — against the JCOP sources, `tests/selftest.py` (37 checks), and against the crate |
 | `lib/elmbpsu_can.py` | written, self-tested; `dump` verified on real hardware |
 | `lib/elmbpsu_opcua.py` | **verified end-to-end against the real crate** on 2026-08-25 |
 | `config/config-elmbpsu.xml` | **verified against the real crate** — server comes up, node table populates |
 | `tests/can_diag.py` | verified both ways: detected a live server, correctly rejected sshd/cups/postfix |
-| `tests/crate_scan.py` | **verified against the real crate** — occupancy, switching and sensor verdicts all confirmed there |
+| `tests/crate_scan.py` | **verified against the real crate** — switching and sensor verdicts confirmed there. Occupancy called an **empty** slot populated on 2026-08-27; fixed, see below |
 | the crate | answers, switches, and reports sensible voltages and currents. Checked, and not the suspect for module-level faults. |
 
 ---
@@ -73,6 +73,41 @@ measurement artifact** — the rails float, read nothing against chassis, and in
 any case do not come out where they were being metered (REFERENCE.md §5). There
 was never a fault to find there. **Polarity is the production one (1 = ON),
 confirmed by measurement — do not use `--invert` on this crate.**
+
+### An empty slot read as a module (2026-08-27, fixed)
+
+`tests/crate_scan.py` reported slot 1 populated and then failing, on a crate with
+**nothing in slot 1**:
+
+```
+Module 1: FAIL (fails to turn on: branches 2, 3 CAN V+AD V = 0.01 V;
+                unsteady reading: branch 2 CAN I = 2.44 V at the ADC pin;
+                current sensor does not work: branch 2 AD I = 0.27 V,
+                branch 3 CAN I = 0.22 V, branch 3 AD I = 0.21 V)
+```
+
+Three of that slot's four current inputs floated at 0.21–0.27 V as an empty slot
+should. The fourth, **branch 2 CAN I (ADC channel 12), wandered around 2.44 V** —
+inside the ±0.1 V band around the transducer's 2.5 V zero, and the scan took one
+sample landing in that band as proof of a live module. The rest of the report
+followed from that: rails that could never come up were read as "fails to turn
+on", and the genuinely floating channels as failed transducers.
+
+The assumption that broke is in REFERENCE.md §4: an undriven current input is
+**high impedance and free to drift anywhere**, the 2.5 V band included, so a
+single reading there is not evidence of a transducer. Two rules now guard it, and
+`tests/selftest.py` covers both plus the eight cases they must not break:
+
+- a reading counts as a transducer only if the **repeat scans show it holding**
+  that level — a powered source is a quiet DC level;
+- and one sense line alone is not enough. Presence needs **a rail that came up**
+  (only a module can raise one, the divider is on the module) **or two sense
+  lines agreeing** (the four transducers share the module's housekeeping supply,
+  so they come alive together).
+
+Slot 1 now reads ABSENT, with a `!` note in the report naming the drifting
+channel so the discounted reading is not silently swallowed. Slot 4 — one live
+sense line but rails up — is unaffected and stays a real, faulty module.
 
 ### Current sensing is inside the module
 

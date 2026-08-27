@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Offline self-test: simulates an ELMB responder so the CANopen encode/decode,
-branch mapping and unit conversions can be exercised without hardware.
+branch mapping and unit conversions can be exercised without hardware, and
+feeds synthetic 64-channel scans to tests/crate_scan.py so its slot-occupancy
+verdicts are pinned to the readings that should produce them.
 
 Run it as "elmbpsu-selftest" after "source .venv/bin/activate" - the venv is
 what puts lib/ on the import path.  ./setup.sh runs it too."""
@@ -134,6 +136,86 @@ print("branch spec parsing")
 check("'all'", t._parse_branches("all"), list(range(16)))
 check("'0,2,4'", t._parse_branches("0,2,4"), [0, 2, 4])
 check("'0-3'", t._parse_branches("0-3"), [0, 1, 2, 3])
+
+print("slot occupancy verdicts (tests/crate_scan.py)")
+try:
+    import argparse, os, random
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import crate_scan as cs
+    from elmbpsu_opcua import AiSample, branch_channels
+except (ImportError, SystemExit) as exc:
+    # crate_scan.py sys.exit()s on a missing asyncua rather than letting the
+    # ImportError out, so SystemExit has to be caught here too.
+    print(f"  SKIP  needs asyncua ({exc})")
+else:
+    VCH = set(c for b in range(16) for k, c in branch_channels(b).items()
+              if k in ("canv", "adv"))
+
+    def build(chan, state, noise, rng):
+        """One 64-channel scan. Every channel not named in `chan` is an empty
+        slot's: a current input floats near 0.02 V at the ADC pin, a voltage
+        input sits on its 100:1 divider to ground and reads ~0.015 V of rail."""
+        ch = [AiSample(c, 150 if c in VCH else 20000, True, 1.0)
+              for c in range(64)]
+        for (b, key), fn in chan.items():
+            c = branch_channels(b)[key]
+            v = fn(state)
+            raw = v / 100.0 * 1e6 if key in ("canv", "adv") else v * 1e6
+            raw += noise.get((b, key), 0.0) * rng.uniform(-1e6, 1e6)
+            ch[c] = AiSample(c, int(raw), True, 1.0)
+        return ch
+
+    def occupancy(chan, noise=None, samples=5, seed=3):
+        """The verdict tests/crate_scan.py reaches for slot 0."""
+        rng, noise = random.Random(seed), noise or {}
+        args = argparse.Namespace(
+            v_nominal=12.0, v_tol=0.9, v_off_max=0.5, i_zero_tol=0.1,
+            v_stdev_max=0.03, i_stdev_max=0.03, invert=False)
+        args.v_on_min = args.v_nominal - args.v_tol
+        reps = [build(chan, "on", noise, rng) for _ in range(samples)]
+        data = {"do_checks": [], "off": build(chan, "off", noise, rng),
+                "on": build(chan, "on", noise, rng), "repeats": reps,
+                "word_on_state": 0xFFFF, "word_repeats": 0xFFFF,
+                "moving": {"off": [], "on": []}}
+        res = cs.analyse(data, cs.reduce_samples(reps, args), args)
+        return res["slots"][0]["verdict"]
+
+    ZERO = lambda st: 2.5                            # transducer at its zero
+    FLOAT = lambda st: 0.20                          # undriven sense line
+    RAIL = lambda st: 12.0 if st == "on" else 0.008  # a rail that switches
+    DEAD = lambda st: 0.01                           # a rail that never rises
+
+    def slot(cani=ZERO, adi=ZERO, cani_b=ZERO, adi_b=ZERO, rail=RAIL):
+        return {(0, "cani"): cani, (0, "adi"): adi, (1, "cani"): cani_b,
+                (1, "adi"): adi_b, (0, "canv"): rail, (0, "adv"): rail,
+                (1, "canv"): rail, (1, "adv"): rail}
+
+    # The regression: an EMPTY slot whose other three current inputs float at
+    # 0.2 V, with a fourth drifting through the transducer's 2.5 V band. Read
+    # as a module until 2026-08-27, faults and all.
+    empty_but_drifting = slot(cani=lambda st: 2.44, adi=FLOAT, cani_b=FLOAT,
+                              adi_b=FLOAT, rail=DEAD)
+    check("empty slot, one input drifting through the 2.5 V zero",
+          occupancy(empty_but_drifting, noise={(0, "cani"): 0.06}), "ABSENT")
+    check("same, but that input happens to sit still this run",
+          occupancy(empty_but_drifting), "ABSENT")
+    check("plain empty slot", occupancy({}), "ABSENT")
+    check("healthy module", occupancy(slot()), "POPULATED")
+    check("module with one failed transducer, rails up",
+          occupancy(slot(adi_b=FLOAT)), "POPULATED*")
+    check("module with three failed transducers, rails up",
+          occupancy(slot(adi=FLOAT, cani_b=FLOAT, adi_b=lambda st: 3.30)),
+          "POPULATED*")
+    check("module, sensors alive, no rail comes up (dead converter)",
+          occupancy(slot(rail=DEAD)), "POPULATED*")
+    check("module, two sensors alive, dead converter",
+          occupancy(slot(cani_b=FLOAT, adi_b=FLOAT, rail=DEAD)), "POPULATED*")
+    check("module drawing real load current",
+          occupancy(slot(**dict((k, lambda st: 2.5 if st == "off" else 2.75)
+                                for k in ("cani", "adi", "cani_b", "adi_b")))),
+          "POPULATED")
+    check("one sample only: no steadiness evidence, nothing discounted",
+          occupancy(slot(rail=DEAD), samples=1), "POPULATED*")
 
 print()
 print(f"{'ALL TESTS PASSED' if not fails else str(len(fails)) + ' FAILURE(S): ' + ', '.join(fails)}")

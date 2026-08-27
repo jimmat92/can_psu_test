@@ -205,37 +205,53 @@ Because the transducer is inside the module, an implausible current reading is a
 **module** fault — a floating sense line means that module's transducer or its
 connection is not delivering a signal, and no crate-side wiring can cause or fix
 it. `tests/crate_scan.py` checks plausibility before stability for this reason:
-an undriven line sits rock steady at a few hundred mV and would sail through a
-stdev test.
+an undriven line that happens to sit steady would sail through a stdev test.
+
+**An undriven current input does not have to float near ground.** It is high
+impedance, so it is free to drift anywhere in the ADC's range — the 2.5 V band
+included. Measured on this crate 2026-08-27 on an **empty** slot 1: three of its
+four current inputs sat at 0.21–0.27 V, and the fourth wandered around **2.44 V**,
+close enough to the transducer's zero to be read as a live module. So a single
+reading inside the band is *not* by itself proof of a transducer — see the slot
+ladder below.
 
 ### Reading the monitoring values — what each pattern means
 
 The two input types fail *differently*, which is what makes a software diagnosis
 solid. A voltage input sits behind a 100:1 divider to ground and reads ~0 with no
 rail present. A current input is high impedance and floats when the transducer is
-not driving it, landing at a few hundred mV — below the transducer's own floor.
+not driving it, usually landing at a few hundred mV — below the transducer's own
+floor — but not reliably so (above).
 
 | pattern | means |
 |---------|-------|
 | ~12 V on both rails, current at the 2.5 V zero (≈0 A) | branch populated, on, healthy |
 | **V ≈ 0.01 V and I ≈ −19.8 A** | **module absent.** An undriven input near 0 V runs through the formula as (0 − 2.5) × 8 = −20 A, well outside the transducer's range |
 | V healthy, but I sits at 0.17–0.41 V | **that current line is floating** — the module's transducer or its connection, not an output fault |
-| V ≈ 0.008 V, but I still at its 2.5 V zero | **branch switched OFF.** The output is dead; the module's own monitoring electronics are still powered |
+| V ≈ 0.008 V, but I still **holding** its 2.5 V zero | **branch switched OFF.** The output is dead; the module's own monitoring electronics are still powered |
+| V ≈ 0.01 V, and I *near* 2.5 V but **wandering** | **an undriven input that has drifted into the band.** A powered transducer's zero is a quiet DC level; a level that will not hold still is not a source |
 
-The last two rows are the useful ones: an off branch and an absent module are
+The last three rows are the useful ones: an off branch and an absent module are
 identical on the voltage channel and are told apart entirely by the current
-channel.
+channel — which is why that channel has to be read as a *level held over time*,
+not as one number.
 
 Per slot (a module spans branches 2s and 2s+1):
 
-| the slot's four current channels | means |
+| the slot's evidence | means |
 |---|---|
-| all four float, all four voltages ~0 | **no module**, or one making no contact at all |
-| **some** float, others hold 2.5 V | the module is there and partly working — a partial contact or a failed transducer |
+| any rail up | **a module is there**, whatever the sense lines say. The divider is on the module, so nothing else in the crate can raise a rail |
+| no rail up, all four current channels float | **no module**, or one making no contact at all |
+| no rail up, **one** channel at 2.5 V, the rest floating | **no module.** The four transducers share the module's housekeeping supply and come alive together, so one channel alone is far likelier to be a drifting input than a module that has lost three transducers *and* its converter |
+| **two or more** channels hold 2.5 V, some float | the module is there and partly working — a partial contact or a failed transducer |
 | all four hold 2.5 V, a rail stays down | sensing is fine; the fault is the module's **converter or output stage** |
 
-A partial pattern can never be a dead module — a dead module could not produce
-the good channels. `tests/crate_scan.py` applies exactly this ladder.
+Two independent pieces of evidence, then: a rail that came up, or two sense lines
+agreeing. A partial pattern built on *either* can never be a dead module — a dead
+module could not produce the good channels. One lone sense line is not such a
+pattern, and that is what the 2026-08-27 empty-slot reading above proved.
+`tests/crate_scan.py` applies exactly this ladder, and it holds the "at 2.5 V"
+test to the repeat scans rather than to a single reading.
 
 ### What the DO bit does to the hardware
 
@@ -244,7 +260,7 @@ Comparing a branch switched off against an empty slot:
 | | branch switched OFF | module ABSENT |
 |---|---|---|
 | voltage sense | 0.008 V | 0.015 V |
-| current sense | sensor at its 2.5 V zero | ~0.02 V, i.e. undriven |
+| current sense | sensor at its 2.5 V zero | ~0.02 V, i.e. undriven (but see above — undriven does not guarantee a low reading) |
 
 **The bit drives a relay that disconnects the TRACO converter's output** —
 confirmed from the module schematics, 2026-08-26. It is not the converter's

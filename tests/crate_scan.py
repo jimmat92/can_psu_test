@@ -34,12 +34,28 @@ differently, and that is the whole trick:
                     powered by the module's housekeeping supply, NOT by the
                     switched rail, so it keeps sitting at its 2.5 V zero
                     with the branch switched off. With no module in the slot
-                    nothing drives the line and it floats at a few hundred mV.
+                    nothing drives the line and it floats.
 
-So: "current input parked at 2.5 V" == a module is in that slot and its
+So: "current input HOLDING 2.5 V" == a module is in that slot and its
 monitoring electronics are alive. That test is valid in the OFF state as
 well as the ON state, which is why step 2 is a measurement and not just a
 switch test.
+
+Holding is the operative word, and two things guard against reading an empty
+slot as a module. An undriven input is high impedance: it does not have to
+float near ground, it can drift anywhere in the ADC's range, the 2.5 V band
+included -- measured on this crate, an empty slot whose other three current
+inputs sat at 0.2 V had a fourth wandering around 2.44 V. So
+
+    * a reading only counts as a transducer if the repeat scans show it
+      holding that level. A powered source is a quiet DC level; a drifting
+      one is not a source at all;
+    * and one sense line on its own is not enough. The four transducers of a
+      module share its housekeeping supply and come alive together, so a
+      single channel at the zero, in a slot with no rail up either, is far
+      more likely to be a drifting input than a module that has lost three
+      transducers AND its converter. A rail that IS up settles it on its own:
+      the divider is on the module, so nothing else can raise one.
 
 The transducer is rated 5 A nominal / approx +-15 A, which is exactly the
 conversion constants: 2.5 V is zero and 0.625 V of departure is 5 A. Its
@@ -296,6 +312,26 @@ def classify_current(sample, tol):
     return "implausible"       # above the zero reference on an unloaded rail
 
 
+def holds_its_zero(stats, b, key, args):
+    """Does this current input really sit at the transducer's 2.5 V zero, or
+    is it just passing through?
+
+    A single scan cannot tell the two apart. The transducer is a powered
+    source and its zero is a quiet DC level; an undriven input is high
+    impedance, and a high-impedance input does not have to float near ground
+    -- it can drift anywhere in the ADC's range, including straight through
+    the 2.5 V band, and it wanders while it is there. That is why presence is
+    corroborated against the repeat scans rather than decided on one reading:
+    a level that will not hold still is not a source.
+
+    With fewer than two samples there is nothing to judge, so the reading
+    stands -- this can only ever discount evidence, never invent it."""
+    st = stats[b][key]
+    if st is None or st["n"] < 2:
+        return True
+    return st["stdev"] <= args.i_stdev_max
+
+
 def classify_voltage(sample, on_min, off_max):
     """down / partial / up. Only "down" counts as switched off: a rail sitting
     at some intermediate voltage has switched ON, it is just not healthy, and
@@ -439,16 +475,39 @@ def analyse(data, stats, args):
                         view[key], args.v_on_min, args.v_off_max)
 
         # Presence: a current input parked at 2.5 V in EITHER state means the
-        # module's own electronics are alive in that slot.
-        alive = sorted({(b, k) for (b, k, _), v in cur.items() if v == "zero"})
+        # module's own electronics are alive in that slot -- but only if it is
+        # really parked there. An undriven input is high impedance and free to
+        # drift anywhere, the 2.5 V band included, so a single reading inside
+        # the band is not by itself a transducer. It counts as one only if the
+        # repeat scans show it holding that level (holds_its_zero above).
+        at_zero = sorted({(b, k) for (b, k, _), v in cur.items() if v == "zero"})
+        alive = [x for x in at_zero if holds_its_zero(stats, x[0], x[1], args)]
+        drifting = [x for x in at_zero if x not in alive]
         undriven = sorted({(b, k) for (b, k, _), v in cur.items()
                            if v in ("undriven", "implausible")}) if cur else []
-        undriven = [x for x in undriven if x not in alive]
+        undriven = [x for x in undriven if x not in at_zero]
         rails_up = sorted({(b, k) for (b, k, st), v in volt.items()
                            if st == "on" and v in ("up", "partial")})
 
-        if not alive and not rails_up:
-            verdict, detail = "ABSENT", "no module (nothing drives its sense lines)"
+        # A rail that is up can only come from a module -- the divider is on
+        # the module, so nothing else in the crate can raise it. Failing that,
+        # presence needs two sense lines to agree: the four transducers share
+        # the module's housekeeping supply and come alive together, so one
+        # channel on its own, with nothing else in the slot showing a module,
+        # is far more likely to be an undriven input that has drifted into the
+        # band than a module with three dead transducers AND a dead converter.
+        if not rails_up and len(alive) < 2:
+            verdict = "ABSENT"
+            if drifting:
+                detail = (f"no module -- {len(drifting)} sense line(s) pass "
+                          "through the 2.5 V zero without holding it, which is "
+                          "an undriven input, not a transducer")
+            elif alive:
+                detail = ("no module -- one sense line sits at the 2.5 V zero "
+                          "but nothing else here shows a module, and the four "
+                          "transducers share one supply")
+            else:
+                detail = "no module (nothing drives its sense lines)"
         elif len(alive) == 4 and len(rails_up) == n_expect:
             verdict = "POPULATED"
             detail = ("all four sensors alive; no branch was commanded on, so "
@@ -462,16 +521,26 @@ def analyse(data, stats, args):
             verdict = "POPULATED*"
             detail = (f"sensors all alive but only {len(rails_up)} of {n_expect} "
                       "commanded rails came up -- output stage or rail fault")
+        elif not alive and rails_up and drifting:
+            verdict = "POPULATED*"
+            detail = (f"rails are up, so a module is here, but {len(drifting)} "
+                      "sense line(s) are at the 2.5 V zero without holding it "
+                      "steadily enough to be trusted -- see the sensor section")
         elif not alive and rails_up:
             verdict = "POPULATED*"
             detail = ("rails are up but no transducer holds its zero -- "
                       "contradictory, suspect this module's sense electronics")
+        elif drifting:
+            verdict = "POPULATED*"
+            detail = (f"{len(alive)} sensor(s) alive and {len(drifting)} at the "
+                      "2.5 V zero without holding it -- see the channel table")
         else:
             verdict, detail = "POPULATED*", "mixed evidence, see the channel table"
         slots[s] = {"branches": list(branches), "verdict": verdict,
                     "detail": detail, "sensors_alive": len(alive),
                     "rails_up_on": len(rails_up), "rails_expected": n_expect,
-                    "undriven": [f"branch {b} {k}" for b, k in undriven]}
+                    "undriven": [f"branch {b} {k}" for b, k in undriven],
+                    "drifting": [list(x) for x in drifting]}
 
     populated = [s for s in range(8) if slots[s]["verdict"] != "ABSENT"]
 
@@ -617,7 +686,8 @@ def analyse(data, stats, args):
 
     res = {"slots": slots, "populated": populated,
            "switching": switching, "stability": stability,
-           "warnings": settle_warnings(data, args, switching)}
+           "warnings": (settle_warnings(data, args, switching)
+                        + empty_slot_notes(slots, stats))}
     res["faults"] = collect_faults(res, data, stats)
     res["modules"] = summarise_modules(res)
     return res
@@ -651,6 +721,33 @@ def settle_warnings(data, args, switching):
                    "bit-identical, so the repeat scans are largely the same "
                    "conversions read twice and the variance is understated -- "
                    f"try --sample-interval {want:.0f}")
+    return out
+
+
+def empty_slot_notes(slots, stats):
+    """Slots read as empty that had a reading which looks like a transducer.
+
+    Without this the discounted channel leaves no trace in the default report:
+    the slot is simply not listed, and an operator who has seen "2.44 V" in a
+    -v table has no way to tell the verdict weighed it and rejected it from a
+    verdict that never saw it. An ordinary empty slot -- nothing near the zero
+    -- says nothing, so this only speaks when there is something to explain."""
+    out = []
+    for s in sorted(slots):
+        d = slots[s]
+        if d["verdict"] != "ABSENT" or not d["drifting"]:
+            continue
+        where = []
+        for b, key in d["drifting"]:
+            st = stats[b][key]
+            name = f"branch {b} {LABEL[key]}"
+            where.append(name if st is None else
+                         f"{name} ({st['adc_mean']:.2f} V at the ADC pin, "
+                         f"stdev {st['stdev']:.3f} A)")
+        out.append(f"slot {s} read as EMPTY although {'; '.join(where)} is "
+                   "near the 2.5 V zero -- it does not hold that level, so it "
+                   "is an undriven input, not a transducer. Reseat a module "
+                   "here and re-run if you expected one")
     return out
 
 
